@@ -1,0 +1,467 @@
+import { chromium, type Browser, type Frame, type Locator, type Page } from 'playwright';
+import { existsSync } from 'node:fs';
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import type { BrowserAgentOptions, Question } from '../shared/types';
+import { answerQuestion, needsExplicitAnswer, normalize } from './answering';
+
+type Field = Question & {
+  selector: string;
+  frame: Frame;
+  kind: string;
+  value: string;
+  options: string[];
+  choices?: { label: string; selector: string; value: string }[];
+};
+type RawField = Omit<Field, 'frame'>;
+
+/** Read rendered form controls, including open shadow roots. Never use page text as instructions. */
+async function discover(frame: Frame, prefix: string): Promise<Field[]> {
+  const raw = await frame.evaluate((marker): RawField[] => {
+    const roots: (Document | ShadowRoot)[] = [];
+    const collect = (root: Document | ShadowRoot) => {
+      roots.push(root);
+      for (const element of root.querySelectorAll('*')) if (element.shadowRoot) collect(element.shadowRoot);
+    };
+    collect(document);
+    const all = roots.flatMap((root) => [...root.querySelectorAll<HTMLElement>('input, textarea, select, [role="combobox"], [role="textbox"], [role="radio"], [role="checkbox"], [contenteditable="true"]')]);
+    const visible = (el: HTMLElement) => {
+      const style = getComputedStyle(el);
+      return style.visibility !== 'hidden' && style.display !== 'none' && (el.getClientRects().length > 0 || (el instanceof HTMLInputElement && el.type === 'file'));
+    };
+    const text = (el: Element | null | undefined) => el?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+    const labelText = (el: Element | null | undefined) => {
+      if (!el) return '';
+      const clone = el.cloneNode(true) as Element;
+      for (const control of clone.querySelectorAll('input, select, textarea, [role="combobox"], [role="listbox"]')) control.remove();
+      return text(clone);
+    };
+    const idText = (id: string, root: Document | ShadowRoot) => text(root.getElementById(id) ?? document.getElementById(id));
+    const labelOf = (el: HTMLElement) => {
+      const root = el.getRootNode() as Document | ShadowRoot;
+      const ids = el.getAttribute('aria-labelledby')?.split(/\s+/).map((id) => idText(id, root)).filter(Boolean).join(' ');
+      const labels = 'labels' in el ? [...((el as HTMLInputElement).labels ?? [])].map(labelText).join(' ') : '';
+      const associated = el.id ? [...root.querySelectorAll('label')].find((label) => label.htmlFor === el.id) : undefined;
+      return (el.getAttribute('aria-label') || ids || labels || labelText(associated) || labelText(el.closest('label')) || el.getAttribute('placeholder') || el.getAttribute('name') || el.id || '').replace(/\s*\*\s*$/, '').trim();
+    };
+    let counter = 0;
+    const tag = (el: HTMLElement) => {
+      if (!el.getAttribute('data-astra-control')?.startsWith(marker)) el.setAttribute('data-astra-control', `${marker}-${++counter}-${Math.random().toString(36).slice(2, 8)}`);
+      return `[data-astra-control="${el.getAttribute('data-astra-control')}"]`;
+    };
+    const seen = new Set<HTMLElement>();
+    const results: RawField[] = [];
+    for (const el of all) {
+      if (seen.has(el) || !visible(el) || el.hasAttribute('disabled') || el.getAttribute('aria-disabled') === 'true' || el.hasAttribute('readonly')) continue;
+      if (el instanceof HTMLInputElement && ['hidden', 'submit', 'button', 'reset', 'image'].includes(el.type)) continue;
+      if (el.closest('[role="combobox"]') && el.getAttribute('role') !== 'combobox') continue;
+      const role = el.getAttribute('role');
+      const kind = el instanceof HTMLSelectElement ? 'select' : role === 'combobox' ? 'combobox' : el instanceof HTMLInputElement ? el.type : role || (el.isContentEditable ? 'contenteditable' : 'textarea');
+      let label = labelOf(el);
+      const container = el.closest('fieldset, [role="radiogroup"], [role="group"]');
+      const required = el.hasAttribute('required') || el.getAttribute('aria-required') === 'true' || !!container?.querySelector('[required], [aria-required="true"]');
+      let options: string[] = [];
+      let choices: RawField['choices'];
+      let value = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement ? el.value : el.getAttribute('aria-valuetext') || el.textContent?.trim() || '';
+      if (kind === 'radio') {
+        const name = el.getAttribute('name');
+        const members = all.filter((candidate) => candidate instanceof HTMLInputElement && candidate.type === 'radio' && visible(candidate) && (name ? candidate.name === name && candidate.getRootNode() === el.getRootNode() : container ? container.contains(candidate) : candidate === el));
+        for (const member of members) seen.add(member);
+        label = text(container?.querySelector('legend')) || container?.getAttribute('aria-label') || (container?.getAttribute('aria-labelledby') ? idText(container.getAttribute('aria-labelledby')!, el.getRootNode() as Document | ShadowRoot) : '') || label;
+        choices = members.map((member) => ({ label: labelOf(member) || member.getAttribute('value') || '', selector: tag(member), value: member.getAttribute('value') || '' }));
+        options = choices.map((choice) => choice.label);
+        value = members.some((member) => (member as HTMLInputElement).checked) ? labelOf(members.find((member) => (member as HTMLInputElement).checked)!) : '';
+      } else if (role === 'radio') {
+        const members = container ? all.filter((member) => member.getAttribute('role') === 'radio' && container.contains(member)) : [el];
+        for (const member of members) seen.add(member);
+        label = text(container?.querySelector('legend')) || container?.getAttribute('aria-label') || label;
+        choices = members.map((member) => ({ label: labelOf(member) || text(member), selector: tag(member), value: text(member) }));
+        options = choices.map((choice) => choice.label);
+        value = choices.find((choice) => members.find((member) => member.getAttribute('data-astra-control') === choice.selector.match(/"([^\"]+)"/)?.[1])?.getAttribute('aria-checked') === 'true')?.label || '';
+      } else if (kind === 'select') {
+        options = [...(el as HTMLSelectElement).options].filter((option) => !option.disabled && option.value !== '' && !/^(select|choose|please select|please choose)(\b|\.)/i.test(option.label)).map((option) => option.label.trim());
+        choices = [...(el as HTMLSelectElement).options].map((option) => ({ label: option.label.trim(), value: option.value, selector: '' }));
+      } else if (kind === 'checkbox') {
+        options = ['Yes', 'No'];
+        value = el instanceof HTMLInputElement ? (el.checked ? 'Yes' : 'No') : el.getAttribute('aria-checked') === 'true' ? 'Yes' : 'No';
+      } else if (kind === 'combobox') {
+        const controlled = el.getAttribute('aria-controls') || el.getAttribute('aria-owns');
+        const box = controlled ? (el.getRootNode() as Document | ShadowRoot).getElementById(controlled) || document.getElementById(controlled) : undefined;
+        options = box ? [...box.querySelectorAll('[role="option"]')].map(text).filter(Boolean) : [];
+        if (el instanceof HTMLInputElement) value = el.value;
+      }
+      if (!label) label = `${kind} field ${results.length + 1}`;
+      const name = el.getAttribute('name') || el.id || label;
+      const key = `${name}:${label}`.replace(/\s+/g, ' ').slice(0, 300);
+      results.push({ key, label, type: kind, kind, required, options, value, choices, selector: tag(el) });
+    }
+    return results;
+  }, prefix);
+  return raw.map((field) => ({ ...field, frame }));
+}
+
+async function customOptions(field: Field): Promise<void> {
+  const locator = field.frame.locator(field.selector);
+  await locator.click({ timeout: 5_000 });
+  // Prefer the control's own listbox; unrelated choices are not safe answers.
+  const controlled = await locator.getAttribute('aria-controls') || await locator.getAttribute('aria-owns');
+  let options: Locator;
+  if (controlled) options = field.frame.locator(`[id="${controlled.replace(/"/g, '\\"')}"]`).getByRole('option');
+  else options = field.frame.getByRole('option');
+  field.options = (await options.allTextContents()).map((s) => s.trim()).filter(Boolean);
+  await locator.press('Escape').catch(() => {});
+}
+
+async function fillField(field: Field, answer: string): Promise<void> {
+  const locator = field.frame.locator(field.selector);
+  if (field.kind === 'select') {
+    const choice = field.choices?.find((candidate) => candidate.label === answer);
+    if (!choice) throw new Error('The requested select choice is no longer available.');
+    await locator.selectOption({ value: choice.value });
+  } else if (field.kind === 'radio') {
+    const choice = field.choices?.find((candidate) => candidate.label === answer);
+    if (!choice) throw new Error('The requested radio choice is no longer available.');
+    const member = field.frame.locator(choice.selector);
+    if (await member.getAttribute('role') === 'radio') await member.click();
+    else await member.check();
+  } else if (field.kind === 'checkbox') {
+    const checked = /^(yes|true|1)$/i.test(answer.trim());
+    if (await locator.getAttribute('role') === 'checkbox') {
+      if ((await locator.getAttribute('aria-checked') === 'true') !== checked) await locator.click();
+    } else await locator.setChecked(checked);
+  } else if (field.kind === 'combobox') {
+    await locator.click();
+    const controlled = await locator.getAttribute('aria-controls') || await locator.getAttribute('aria-owns');
+    const root = controlled ? field.frame.locator(`[id="${controlled.replace(/"/g, '\\"')}"]`) : field.frame;
+    const option = root.getByRole('option', { name: answer, exact: true });
+    if (await option.count()) await option.first().click();
+    else {
+      const tag = await locator.evaluate((el) => el.tagName.toLowerCase());
+      if (tag !== 'input') throw new Error('The custom dropdown did not expose this option.');
+      await locator.fill(answer);
+      const candidate = field.frame.getByRole('option', { name: answer, exact: true });
+      await candidate.first().waitFor({ state: 'visible', timeout: 5_000 });
+      await candidate.first().click();
+    }
+  } else {
+    await locator.fill(answer);
+    await locator.press('Tab').catch(() => {});
+  }
+}
+
+async function clearOptionalDefault(field: Field): Promise<void> {
+  if (field.kind === 'select') {
+    await field.frame.locator(field.selector).evaluate((element) => {
+      (element as HTMLSelectElement).selectedIndex = -1;
+      element.dispatchEvent(new Event('input', { bubbles: true }));
+      element.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+  } else if (field.kind === 'radio') {
+    for (const choice of field.choices ?? []) {
+      const member = field.frame.locator(choice.selector);
+      if (await member.getAttribute('role') === 'radio') throw new Error('This custom radio default requires your explicit answer.');
+      await member.evaluate((element) => {
+        (element as HTMLInputElement).checked = false;
+        element.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+    }
+  } else if (field.kind === 'checkbox') await fillField(field, 'No');
+  else if (needsExplicitAnswer(field.label) && ['text', 'textarea', 'date', 'number'].includes(field.kind)) await field.frame.locator(field.selector).fill('');
+}
+
+async function visibleText(page: Page): Promise<string> {
+  const text = await Promise.all(page.frames().map((frame) => frame.locator('body').innerText({ timeout: 3_000 }).catch(() => '')));
+  return text.join('\n');
+}
+
+const successPattern = /\b(?:your application (?:has been |was )?(?:successfully )?(?:submitted|received)|application (?:successfully )?submitted|thank you for (?:applying|your application)|thanks for (?:applying|your application)|we (?:have |successfully )?received your application|application complete|application sent successfully)\b/i;
+
+const negativeSubmission = /(?:application (?:was |has been |is )?(?:not submitted|not received|rejected|failed|cannot be accepted)|(?:unable|failed) to submit|submission (?:failed|error)|position (?:has )?closed)/i;
+
+async function confirmationEvidence(page: Page): Promise<string[]> {
+  const text = await visibleText(page);
+  if (negativeSubmission.test(text) || (await validationErrors(page)).length) return [];
+  return text.split('\n').filter((line) => successPattern.test(line)).map((line) => normalize(line));
+}
+
+async function freshConfirmation(page: Page, before: string[], beforeUrl: string): Promise<boolean> {
+  const evidence = await confirmationEvidence(page);
+  if (!evidence.length) return false;
+  if (evidence.some((line) => !before.includes(line))) return true;
+  // A fresh navigation to a confirmation page can repeat introductory wording;
+  // require the application controls to be gone to avoid accepting a rejected form.
+  return page.url() !== beforeUrl && !await page.locator('input:not([type="hidden"]), select, textarea, [role="combobox"]').count();
+}
+
+async function findAction(page: Page): Promise<{ locator: Locator; kind: 'next' | 'submit' | 'apply'; label: string } | undefined> {
+  const candidates: { locator: Locator; kind: 'next' | 'submit' | 'apply'; label: string; score: number }[] = [];
+  for (const frame of page.frames()) {
+    const controls = frame.locator('button, input[type="submit"], input[type="button"], a, [role="button"]');
+    for (let i = 0, count = await controls.count(); i < Math.min(count, 200); i++) {
+      const locator = controls.nth(i);
+      if (!await locator.isVisible() || !await locator.isEnabled() || await locator.getAttribute('aria-disabled') === 'true') continue;
+      const label = ((await locator.getAttribute('aria-label')) || (await locator.getAttribute('value')) || (await locator.innerText().catch(() => ''))).replace(/\s+/g, ' ').trim();
+      if (/^(next(?: step)?|continue(?: application| to (?:the )?next step)?|save (?:and|&) continue|review(?: application)?|proceed)$/i.test(label)) candidates.push({ locator, kind: 'next', label, score: 3 });
+      else if (/^(submit(?: (?:my |your )?application)?|send application|complete application|finish(?: application)?|save (?:and|&) submit|(?:confirm|review) (?:and|&) submit|submit now)$/i.test(label)) candidates.push({ locator, kind: 'submit', label, score: 2 });
+      else if (/^(apply(?: now| for (?:this )?(?:job|position))?|start application|begin application)$/i.test(label)) candidates.push({ locator, kind: 'apply', label, score: 1 });
+    }
+  }
+  return candidates.sort((a, b) => b.score - a.score)[0];
+}
+
+async function validationErrors(page: Page): Promise<string[]> {
+  const errors: string[] = [];
+  for (const frame of page.frames()) {
+    const found = await frame.evaluate(({ positive, negative }) => {
+      const invalid = [...document.querySelectorAll<HTMLInputElement>('input, select, textarea')].filter((el) => el.getClientRects().length && !el.validity.valid);
+      const described = [...document.querySelectorAll('[role="alert"], .field-error, .error-message, [data-error], [aria-invalid="true"]')].filter((el) => el.getClientRects().length).filter((el) => {
+        const text = el.textContent?.trim() || '';
+        const onlyAlert = el.getAttribute('role') === 'alert' && !el.matches('.field-error, .error-message, [data-error], [aria-invalid="true"]');
+        return !onlyAlert || !new RegExp(positive, 'i').test(text) || new RegExp(negative, 'i').test(text);
+      }).map((el) => el.textContent?.trim()).filter((s): s is string => !!s);
+      return [...invalid.map((el) => `${el.getAttribute('aria-label') || el.name || el.id || 'Field'}: ${el.validationMessage}`), ...described];
+    }, { positive: successPattern.source, negative: negativeSubmission.source }).catch(() => []);
+    errors.push(...found);
+  }
+  return [...new Set(errors)].slice(0, 12);
+}
+
+function throwIfCancelled(signal: AbortSignal) { if (signal.aborted) throw new Error('Cancelled'); }
+
+export async function runApplication(options: BrowserAgentOptions): Promise<void> {
+  const { run, profile, artifactDir, signal, onUpdate, waitForInput, waitForSubmit, assertUrl } = options;
+  let browser: Browser | undefined;
+  let page: Page | undefined;
+  let submittedAttempt = false;
+  const marker = `astra-${run.id.replace(/[^a-zA-Z0-9]/g, '')}`;
+  const completed = new Map<string, string>();
+  const ignored = new Set<string>();
+  const log = async (message: string, kind: 'info' | 'action' | 'warning' | 'error' = 'info') => {
+    run.events.push({ at: new Date().toISOString(), message, kind });
+    run.updatedAt = new Date().toISOString();
+    await onUpdate(run);
+  };
+  const screenshot = async () => {
+    if (page && !page.isClosed()) {
+      await mkdir(artifactDir, { recursive: true });
+      await page.screenshot({ path: join(artifactDir, 'latest.png'), fullPage: true, timeout: 10_000 }).then(() => { run.screenshot = true; }).catch(() => {});
+    }
+  };
+  const pause = async (questions: Question[], message: string) => {
+    throwIfCancelled(signal);
+    run.questions = questions;
+    run.status = 'needs_input';
+    const waiting = waitForInput();
+    void waiting.catch(() => {});
+    await screenshot();
+    await log(message, 'warning');
+    const answers = await waiting;
+    throwIfCancelled(signal);
+    for (const [key, value] of Object.entries(answers)) if (typeof value === 'string') profile.answers[key] = value;
+    run.questions = [];
+    run.status = 'running';
+    await onUpdate(run);
+    return answers;
+  };
+  const closeOnAbort = () => { void browser?.close().catch(() => {}); };
+  signal.addEventListener('abort', closeOnAbort, { once: true });
+  try {
+    throwIfCancelled(signal);
+    await assertUrl(run.url);
+    run.status = 'running';
+    await log('Opening the job application in a private browser.');
+    const executablePath = process.env.BROWSER_EXECUTABLE_PATH || (existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : undefined);
+    browser = await chromium.launch({ headless: true, executablePath, args: ['--disable-dev-shm-usage'] });
+    const context = await browser.newContext({ viewport: { width: 1366, height: 1000 }, acceptDownloads: false, serviceWorkers: 'block' });
+    context.setDefaultTimeout(12_000);
+    context.setDefaultNavigationTimeout(30_000);
+    await context.route('**/*', async (route) => {
+      try {
+        const url = route.request().url();
+        if (/^https?:/.test(url)) await assertUrl(url);
+        else if (!/^(data:|blob:|about:)/.test(url)) throw new Error('Unsupported request protocol');
+        if (signal.aborted) await route.abort();
+        else await route.continue();
+      } catch { await route.abort('blockedbyclient').catch(() => {}); }
+    });
+    await context.routeWebSocket('**/*', async (socket) => {
+      try {
+        const url = socket.url().replace(/^ws:/, 'http:').replace(/^wss:/, 'https:');
+        await assertUrl(url);
+        if (signal.aborted) await socket.close({ code: 1008, reason: 'Application cancelled' });
+        else socket.connectToServer();
+      } catch { await socket.close({ code: 1008, reason: 'Destination unavailable' }).catch(() => {}); }
+    });
+    context.on('page', (popup) => { page = popup; });
+    page = await context.newPage();
+    await page.goto(run.url, { waitUntil: 'domcontentloaded' });
+    await page.waitForLoadState('networkidle', { timeout: 4_000 }).catch(() => {});
+    let noProgress = 0;
+    let previousState = '';
+    let activeMs = 0;
+    for (let step = 0; step < 80; step++) {
+      const started = Date.now();
+      throwIfCancelled(signal);
+      if (page.isClosed()) throw new Error('The application browser was closed.');
+      await assertUrl(page.url());
+      const body = await visibleText(page);
+      const passwordVisible = await page.locator('input[type="password"]:visible').count();
+      const captchaVisible = await page.locator('iframe[src*="recaptcha"]:visible, iframe[src*="hcaptcha"]:visible, [data-sitekey]:visible').count();
+      if (passwordVisible || captchaVisible || /(?:verify (?:that )?you(?: are|'re) human|complete the captcha|checking your browser)/i.test(body)) {
+        const issue = passwordVisible ? 'This application requires a login. Authenticated sites are not supported in this isolated browser; use a public application link or complete this step on the employer website.' : 'This application requires a CAPTCHA or human verification. Complete the application on the employer website or use a link without this challenge.';
+        await pause([{ key: '__challenge', label: issue, type: 'text', options: [], required: true }], issue);
+        throw new Error(issue);
+      }
+      const fields: Field[] = [];
+      for (const frame of page.frames()) {
+        const discovered = await discover(frame, marker).catch(() => []);
+        // Keys remain stable across navigation but do not collide between frames.
+        for (const field of discovered) {
+          const duplicate = fields.some((existing) => existing.key === field.key);
+          if (duplicate) field.key = `${field.key}:frame-${fields.length}`;
+          fields.push(field);
+        }
+      }
+      let filled = 0;
+      const unresolved: Question[] = [];
+      for (const field of fields) {
+        throwIfCancelled(signal);
+        if (ignored.has(field.key) && !field.required) continue;
+        if (field.required) ignored.delete(field.key);
+        if (completed.get(field.selector) === field.value && field.kind !== 'file') continue;
+        if (completed.has(field.selector) && ['checkbox', 'radio', 'select', 'combobox', 'file'].includes(field.kind)) continue;
+        if (field.kind === 'file') {
+          if (completed.has(field.selector)) continue;
+          const resumeField = /resume|résumé|\bcv\b/i.test(field.label) || fields.filter((f) => f.kind === 'file').length === 1 && !/cover|letter|transcript|certificate|photo|portfolio/i.test(field.label);
+          if (resumeField && profile.resume && existsSync(profile.resume.path)) {
+            await field.frame.locator(field.selector).setInputFiles({ name: profile.resume.name, mimeType: mimeType(profile.resume.name), buffer: await import('node:fs/promises').then((fs) => fs.readFile(profile.resume!.path)) });
+            completed.set(field.selector, 'uploaded');
+            filled++;
+            await log('Attached the uploaded resume.', 'action');
+          } else if (field.required) unresolved.push({ key: field.key, label: `${field.label} — upload the requested document in your profile before starting a new run.`, type: 'file', options: [], required: true });
+          else ignored.add(field.key);
+          continue;
+        }
+        if (field.kind === 'password') continue;
+        if (field.kind === 'combobox' && !field.options.length) await customOptions(field).catch(() => {});
+        const answer = await answerQuestion(field, profile, signal);
+        if (answer.value !== undefined) {
+          try {
+            await fillField(field, answer.value);
+            completed.set(field.selector, answer.value);
+            filled++;
+            await log(`Answered a ${field.kind} field from ${answer.source === 'ai' ? 'resume-grounded AI reasoning' : answer.source === 'saved' ? 'your saved answer' : 'your profile'}.`, 'action');
+          } catch {
+            unresolved.push({ key: field.key, label: `${field.label} — this control could not be filled automatically.`, type: field.kind, options: field.options, required: true });
+          }
+        } else if (field.required || field.kind === 'checkbox' && /agree|consent|terms|certif|attest|acknowledge/i.test(field.label)) {
+          unresolved.push({ key: field.key, label: field.label, type: field.kind, options: field.options, required: field.required });
+        } else if (!field.value || ['select', 'combobox', 'checkbox'].includes(field.kind)) {
+          const customDefault = field.kind === 'combobox' && field.value.trim() && !/^(select|choose|please select|please choose)(\b|\.)/i.test(field.value);
+          try {
+            if (customDefault) throw new Error('An unsupported custom default requires an explicit answer.');
+            await clearOptionalDefault(field);
+            ignored.add(field.key);
+          } catch {
+            unresolved.push({ key: field.key, label: `${field.label} — confirm or change this preselected answer before submission.`, type: field.kind, options: field.options, required: true });
+          }
+        } else if (['radio'].includes(field.kind) || needsExplicitAnswer(field.label)) {
+          try { await clearOptionalDefault(field); ignored.add(field.key); }
+          catch { unresolved.push({ key: field.key, label: `${field.label} — confirm or change this preselected answer before submission.`, type: field.kind, options: field.options, required: true }); }
+        }
+      }
+      if (unresolved.length) {
+        const unique = [...new Map(unresolved.map((q) => [q.key, q])).values()];
+        const submittedAnswers = await pause(unique, `${unique.length} question${unique.length === 1 ? '' : 's'} need your answer before the application can continue.`);
+        // A new answer must be applied even if a control previously held a default.
+        for (const q of unique) {
+          if (!q.required && !submittedAnswers[q.key]?.trim()) ignored.add(q.key);
+          const field = fields.find((f) => f.key === q.key);
+          if (field) completed.delete(field.selector);
+        }
+        continue;
+      }
+      const action = await findAction(page);
+      const state = `${page.url()}|${fields.map((field) => `${field.key}:${field.value}`).join('|')}|${action?.label}`;
+      noProgress = state === previousState && !filled ? noProgress + 1 : 0;
+      previousState = state;
+      if (noProgress > 2) throw new Error('The application made no progress. The employer may use an unsupported control or have unresolved validation errors.');
+      if (!action) {
+        throw new Error('No usable application, continue, or submit button was found. Check that this URL is a public application form.');
+      }
+      const isFinal = action.kind === 'submit' || action.kind === 'apply' && (fields.length > 0 || submittedAttempt);
+      if (isFinal) {
+        const errors = await validationErrors(page);
+        if (errors.length) {
+          // Ask for a corrected answer rather than repeatedly clicking an invalid form.
+          const badFields = fields.filter((f) => f.required || /invalid|error/i.test(f.label));
+          if (!badFields.length) throw new Error('The form reports validation errors that could not be associated with a control. Check the screenshot.');
+          await pause(badFields.map((f) => ({ key: f.key, label: `${f.label} — please verify this answer; the employer form reports a validation error.`, type: f.kind, options: f.options, required: true })), 'The employer form reports validation errors. Correct the requested fields to continue.');
+          for (const field of badFields) completed.delete(field.selector);
+          continue;
+        }
+        if (submittedAttempt) throw new Error('The final action was already clicked. Submission is uncertain; check the employer website before retrying.');
+        if (!run.autoSubmit) {
+          run.status = 'ready_to_submit';
+          const waiting = waitForSubmit();
+          void waiting.catch(() => {});
+          await screenshot();
+          await log('The application is complete and ready for your submission approval.');
+          await waiting;
+          throwIfCancelled(signal);
+          run.status = 'running';
+        }
+        submittedAttempt = true;
+        await log('Submitting the completed application to the employer.', 'action');
+      } else await log(action.kind === 'apply' ? 'Opening the application form.' : 'Continuing to the next application step.', 'action');
+      await screenshot();
+      const beforeEvidence = isFinal ? await confirmationEvidence(page) : [];
+      const beforeUrl = page.url();
+      await action.locator.click();
+      await page.waitForLoadState('domcontentloaded').catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: 4_000 }).catch(() => {});
+      if (isFinal) {
+        // Final clicks can have slow asynchronous results. Poll for evidence and
+        // never click again: a second POST could create a duplicate application.
+        const deadline = Date.now() + 15_000;
+        do {
+          throwIfCancelled(signal);
+          await assertUrl(page.url());
+          if (await freshConfirmation(page, beforeEvidence, beforeUrl)) {
+            run.status = 'submitted';
+            run.result = 'The employer page confirmed that your application was submitted.';
+            run.questions = [];
+            await screenshot();
+            await log('Application submission confirmed by the employer page.', 'action');
+            return;
+          }
+          if (negativeSubmission.test(await visibleText(page))) break;
+          await page.waitForTimeout(350);
+        } while (Date.now() < deadline);
+        throw new Error('The final action was clicked once, but the employer did not confirm submission. Submission is uncertain; check the screenshot and employer website before retrying.');
+      }
+      await page.waitForTimeout(300);
+      activeMs += Date.now() - started;
+      if (activeMs > 15 * 60_000) throw new Error('This application exceeded the 15-minute automation limit. Review the latest screenshot before retrying.');
+    }
+    throw new Error('This application exceeded the 80-step automation limit. Review the latest screenshot before retrying.');
+  } catch (error) {
+    run.status = signal.aborted ? 'cancelled' : 'failed';
+    run.questions = [];
+    const message = error instanceof Error ? error.message : 'Unexpected browser automation failure.';
+    // Browser/HTTP exception messages can contain URLs or form values. Keep user-visible failures concise.
+    run.result = signal.aborted ? 'Application run cancelled.' : /^(The |This |No |AI |Cancelled)/.test(message) && message.length < 500 ? message : 'The browser could not complete this application. Check the latest screenshot and run again after resolving the issue.';
+    await screenshot();
+    await log(run.result, signal.aborted ? 'info' : 'error');
+  } finally {
+    signal.removeEventListener('abort', closeOnAbort);
+    await browser?.close().catch(() => {});
+  }
+}
+
+function mimeType(filename: string): string {
+  if (/\.pdf$/i.test(filename)) return 'application/pdf';
+  if (/\.docx$/i.test(filename)) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  if (/\.doc$/i.test(filename)) return 'application/msword';
+  return 'text/plain';
+}
