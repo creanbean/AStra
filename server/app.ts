@@ -6,10 +6,12 @@ import { mkdir, writeFile, access } from 'node:fs/promises';
 import path from 'node:path';
 import { PDFParse } from 'pdf-parse';
 import mammoth from 'mammoth';
+import { CampaignRunner } from './campaign.js';
+import { preferencesSchema, canonicalUrl } from './discovery.js';
 import { Store } from './store.js';
 import { assertPublicUrl } from './security.js';
 import { runApplication } from './agent.js';
-import { emptyProfile, type ApplicationRun, type Profile } from '../shared/types.js';
+import { emptyProfile, type ApplicationRun, type Profile, type Campaign } from '../shared/types.js';
 
 const strings = Object.fromEntries(Object.keys(emptyProfile).filter(key => key !== 'answers').map(key => [key, z.string().max(10000).default('')]));
 const answerSchema = z.record(z.string().min(1).max(1000), z.string().max(10000)).refine(value => Object.keys(value).length <= 200, 'Too many answers.');
@@ -100,18 +102,23 @@ export async function createApp(dataDir = process.env.ASTRA_DATA_DIR || '.astra'
   });
   app.get('/api/runs', (_req, res) => res.json([...store.runs].reverse()));
   app.get('/api/runs/:id', (req, res) => res.json(getRun(req.params.id)));
-  app.post('/api/runs', async (req, res) => {
-    if (active) return res.status(409).json({ error: 'Finish or cancel the current application before starting another.' });
-    const { url, autoSubmit } = runSchema.parse(req.body);
-    if (!store.profile.firstName || !store.profile.lastName || !store.profile.email || !store.profile.resume) return res.status(400).json({ error: 'Save your name, email, and resume before starting an application.' });
+  function requireProfile() {
+    if (!store.profile.firstName || !store.profile.lastName || !store.profile.email || !store.profile.resume) throw new Error('Save your name, email, and resume before starting an application.');
+  }
+  async function beginRun(url: string, autoSubmit: boolean, campaign?: Campaign, parentSignal?: AbortSignal) {
+    requireProfile();
     await assertPublicUrl(url);
-    // Recheck after the asynchronous DNS operation to avoid concurrent runs.
-    if (active) return res.status(409).json({ error: 'An application is already active.' });
+    parentSignal?.throwIfAborted();
+    if (active) throw new Error('An application is already active.');
+    if (store.runs.some(r => canonicalUrl(r.url) === canonicalUrl(url))) throw new Error('This job already has an application attempt. Check its history before applying again.');
     const now = new Date().toISOString();
-    const run: ApplicationRun = { id: randomUUID(), url, autoSubmit, status: 'queued', createdAt: now, updatedAt: now, events: [], questions: [] };
+    const run: ApplicationRun = { id: randomUUID(), url, autoSubmit, campaignId: campaign?.id, searchPreferences: campaign?.preferences, status: 'queued', createdAt: now, updatedAt: now, events: [], questions: [] };
     const profile = structuredClone(store.profile);
     const control: ActiveRun = { id: run.id, controller: new AbortController() };
     active = control;
+    const abort = () => control.controller.abort();
+    parentSignal?.addEventListener('abort', abort, { once: true });
+    if (parentSignal?.aborted) abort();
     store.runs.push(run);
     await mkdir(store.artifactDir(run.id), { recursive: true, mode: 0o700 });
     await store.save();
@@ -129,10 +136,42 @@ export async function createApp(dataDir = process.env.ASTRA_DATA_DIR || '.astra'
       }
     }).finally(async () => {
       clearTimeout(timer);
+      parentSignal?.removeEventListener('abort', abort);
       if (active?.id === run.id) active = undefined;
       run.updatedAt = new Date().toISOString();
       await store.save();
     });
+    return { run, task: control.task };
+  }
+  const campaigns = new CampaignRunner(store, { apply: async (job, campaign, signal) => {
+    const { run, task } = await beginRun(job.url, campaign.preferences.autoSubmit, campaign, signal);
+    job.runId = run.id;
+    await store.save();
+    await task;
+    return run;
+  } });
+  app.get('/api/campaigns', (_req, res) => res.json([...store.campaigns].reverse()));
+  app.post('/api/campaigns', async (req, res) => {
+    if (active || campaigns.busy) return res.status(409).json({ error: 'Finish or stop the current application campaign first.' });
+    requireProfile();
+    if (!process.env.AI_API_KEY) throw new Error('Set AI_API_KEY before starting automatic job discovery.');
+    res.status(201).json(await campaigns.start(preferencesSchema.parse(req.body)));
+  });
+  app.post('/api/campaigns/:id/stop', async (req, res) => {
+    if (!store.campaigns.some(c => c.id === req.params.id && c.status === 'running')) throw new Error('This campaign is not running.');
+    await campaigns.stop();
+    res.json(store.campaigns.find(c => c.id === req.params.id));
+  });
+  app.post('/api/campaigns/:id/resume', async (req, res) => {
+    if (active || campaigns.busy) return res.status(409).json({ error: 'An application is already active.' });
+    requireProfile();
+    if (!process.env.AI_API_KEY) throw new Error('Set AI_API_KEY before resuming automatic discovery.');
+    res.json(await campaigns.resume(req.params.id));
+  });
+  app.post('/api/runs', async (req, res) => {
+    if (active || campaigns.busy) return res.status(409).json({ error: 'Finish or cancel the current application before starting another.' });
+    const { url, autoSubmit } = runSchema.parse(req.body);
+    const { run } = await beginRun(url, autoSubmit);
     res.status(201).json(run);
   });
   app.post('/api/runs/:id/answers', async (req, res) => {
@@ -181,5 +220,5 @@ export async function createApp(dataDir = process.env.ASTRA_DATA_DIR || '.astra'
     const status = (error as { status?: number }).status || 400;
     res.status(status).json({ error: error instanceof Error ? error.message : 'Request failed.' });
   });
-  return { app, store, close: async () => { const task = active?.task; active?.controller.abort(); if (task) await task; await store.save(); } };
+  return { app, store, close: async () => { await campaigns.stop(); const task = active?.task; active?.controller.abort(); if (task) await task; await store.save(); } };
 }

@@ -35,6 +35,18 @@ function fixture(): ExpressApp {
   app.use(express.urlencoded({ extended: false }));
   const upload = multer({ storage: multer.memoryStorage() });
 
+  let humanSolved = false;
+  app.get('/human-check', (_req, res) => { humanSolved = false; res.send(document(`
+    <div id="gate" data-sitekey="fixture">Human verification widget</div>
+    <textarea name="g-recaptcha-response" hidden></textarea>
+    <form method="post" action="/human-submit">${identityFields}<button>Submit application</button></form>
+    <script>const poll=setInterval(async()=>{if((await (await fetch('/human-status')).json()).solved){
+      document.querySelector('[name="g-recaptcha-response"]').value='user-completed-fixture';
+      document.querySelector('#gate').remove();clearInterval(poll);}},50);</script>`)); });
+  app.get('/human-status', (_req, res) => res.json({ solved: humanSolved }));
+  app.post('/human-solve', (_req, res) => { humanSolved = true; res.json({ ok: true }); });
+  app.post('/human-submit', (req, res) => { record('/human-submit', req.body); res.redirect(303, '/complete'); });
+
   app.get('/workflow/step-1', (_req, res) => res.send(document(`
     <h1>Apply for Software Engineer</h1><p>Step 1 of 2: Contact details</p>
     <form method="post" action="/workflow/step-1" enctype="multipart/form-data">
@@ -212,6 +224,8 @@ function fixture(): ExpressApp {
     record('/optional-demographic-defaults', req.body);
     res.redirect(303, '/complete');
   });
+  app.get('/semantic-form', (_req, res) => res.send(document(`<h1>Electrical Engineer I</h1><p>Open role for new graduates in New Jersey.</p><form method="post" action="/semantic-submit">${identityFields}<button type="button" onclick="this.form.submit()">Send my candidacy to the hiring team</button></form>`)));
+  app.post('/semantic-submit', (req, res) => { record('/semantic-submit', req.body); res.redirect(303, '/complete'); });
   app.get('/complete', (_req, res) => res.send(document('<h1>Application submitted successfully</h1><p>Thank you for applying. Your application has been received.</p>')));
   return app;
 }
@@ -264,6 +278,40 @@ afterAll(async () => {
 });
 
 describe('browser application agent against a real local application server', () => {
+  it('uses live-page fit checking and a semantic navigation decision for an unfamiliar final button', async () => {
+    vi.stubEnv('AI_API_KEY', 'fixture-key');
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const request = JSON.parse(String(init?.body));
+      const input = JSON.parse(request.input);
+      const answer = request.instructions.startsWith('Check this job page')
+        ? { matches: true, evidence: 'Open role for new graduates in New Jersey.', reason: 'Fits criteria' }
+        : { index: input.controls.findIndex((c: {label:string}) => c.label === 'Send my candidacy to the hiring team'), kind: 'submit' };
+      return new Response(JSON.stringify({ status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(answer) }] }] }));
+    });
+    try {
+      const run: ApplicationRun = { id: crypto.randomUUID(), url: origin + '/semantic-form', autoSubmit: true, status: 'queued', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), events: [], questions: [], searchPreferences: { description: 'Electrical engineering', level: 'entry-level', location: 'New Jersey', maxApplications: 1, maxSearchRounds: 1, autoSubmit: true } };
+      const result = await application('/semantic-form', { run });
+      expect(result.run.status, JSON.stringify(run.events)).toBe('submitted');
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      expect(submissions).toHaveLength(1);
+      expect(submissions[0].fields.email).toBe(profile.email);
+    } finally { fetchSpy.mockRestore(); vi.stubEnv('AI_API_KEY', ''); }
+  });
+
+  it('pauses for a human challenge and resumes the same browser session to submission', async () => {
+    const waitForInput = vi.fn(async () => {
+      expect(submissions).toHaveLength(0);
+      await fetch(origin + '/human-solve', { method: 'POST' });
+      await new Promise(resolve => setTimeout(resolve, 250));
+      return { __challenge: 'Continue' };
+    });
+    const { run } = await application('/human-check', { waitForInput });
+    expect(run.status, JSON.stringify(run.events)).toBe('submitted');
+    expect(waitForInput).toHaveBeenCalledTimes(1);
+    expect(submissions).toHaveLength(1);
+    expect(submissions[0].fields.email).toBe(profile.email);
+  });
+
   it('submits a complete multistep application with the actual resume, dropdowns, radios, and consent', async () => {
     const { run, updates } = await application('/workflow/step-1');
     expect(run.status, JSON.stringify(run.events)).toBe('submitted');

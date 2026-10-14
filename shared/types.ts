@@ -26,7 +26,7 @@ export interface Profile {
 }
 export type RunStatus = 'queued' | 'running' | 'needs_input' | 'ready_to_submit' | 'submitted' | 'failed' | 'cancelled';
 export interface RunEvent { at: string; message: string; kind: 'info' | 'action' | 'warning' | 'error' }
-export interface Question { key: string; label: string; type: string; options: string[]; required: boolean }
+export interface Question { context?: string; key: string; label: string; type: string; options: string[]; required: boolean }
 export interface ApplicationRun {
   id: string;
   url: string;
@@ -37,6 +37,8 @@ export interface ApplicationRun {
   events: RunEvent[];
   questions: Question[];
   screenshot?: boolean;
+  campaignId?: string;
+  searchPreferences?: SearchPreferences;
   result?: string;
 }
 export interface BrowserAgentOptions {
@@ -55,3 +57,30 @@ export const emptyProfile: Profile = {
   linkedin: '', website: '', currentCompany: '', currentTitle: '', yearsExperience: '', workAuthorization: '', requiresSponsorship: '',
   salaryExpectation: '', availableStartDate: '', education: '', skills: '', summary: '', answers: {},
 };
+
+export interface SearchPreferences {
+  description: string;
+  level: 'entry-level' | 'internship';
+  location: string;
+  maxApplications: number;
+  maxSearchRounds: number;
+  autoSubmit: boolean;
+}
+export interface JobCandidate {
+  url: string;
+  title: string;
+  company: string;
+  location: string;
+  reason: string;
+  state: 'queued' | 'running' | 'submitted' | 'failed' | 'skipped';
+  runId?: string;
+}
+export interface Campaign {
+  id: string;
+  preferences: SearchPreferences;
+  status: 'running' | 'paused' | 'completed' | 'failed';
+  rounds: number;
+  jobs: JobCandidate[];
+  message: string;
+  createdAt: string;
+}

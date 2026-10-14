@@ -1,52 +1,84 @@
-# AStra
+# AStra — find and apply to electrical engineering jobs
 
-A local job application agent that reads your resume and profile, fills browser forms, uploads the resume, moves through application pages, and submits the application. The dashboard shows what the agent is doing and lets you supply missing answers without restarting.
+AStra is a local app with a visible automation browser. Describe your target roles, choose **entry-level / new graduate** or **internship**, specify a location, upload your PDF resume, and click **Find jobs & apply**. It discovers live listings, checks each listing against your criteria, and works through applications using your profile and resume.
 
-## Run
+## Easiest setup
 
-Requires Node.js 24+ and Chromium. From this checkout:
+1. Install **Node.js 24 LTS** from https://nodejs.org.
+2. Download this repository with **Code → Download ZIP**, and extract it.
+3. **Windows:** double-click `Start-AStra.bat`. **Mac:** run `bash Start-AStra.command` in Terminal from the extracted folder (or double-click it if macOS permits).
+4. The setup asks for your **OpenAI API key**, installs Chromium, and builds the app. API usage is separately billed; a ChatGPT subscription alone does not provide an API key or credits. The terminal key entry is visible, so enter it privately.
+5. Open **http://127.0.0.1:3000**. Keep the launcher terminal open while applications run.
+
+Or, from Terminal:
+
+```sh
+npm run setup
+```
+
+The launcher saves configuration to your local, Git-ignored `.env`. To change the API key/model later, edit that file and restart. Subsequent launches reuse it. If port 3000 is occupied, set `PORT` in `.env` and open that port instead. On Linux, install browser dependencies using `npx playwright install --with-deps chromium` if needed.
+
+## Use it
+
+1. In **My profile**, save your name, email, phone, location, education, experience, work authorization and reusable answers. Fill in facts you want the bot to use; it cannot derive your preferences or every legal answer from a resume.
+2. Upload a **text-based PDF resume** (up to 10 MB; DOCX/TXT also supported). AStra extracts its text for answers and attaches the original file to applications. Image-only/scanned PDFs need OCR first.
+3. Under **Find + apply automatically**, describe your desired roles, select internship or entry-level, and specify geographic/remote constraints.
+4. Set a maximum number of **application attempts** and **search batches**. Start small to validate your profile. Unsuccessful and interrupted application attempts count toward the limit; these are not promised successful submissions.
+5. Click **Find jobs & apply**. Auto-submit is enabled unless you check **Review each application before submission**.
+6. If AStra asks for missing facts, answer in the dashboard. If it encounters CAPTCHA, login, an email code, or an unusual widget, complete that step in the **browser window opened by AStra**, then click **I've completed this — continue**. A separate tab opened from the listing link does not share the automation session. Optional desktop alerts are available in application activity.
+
+The queue searches for up to five jobs per batch and begins applying immediately. It searches again after the batch, until the application/search limit or three empty search batches. The job list includes clickable sources and fit reasons. **Pause campaign** stops the active browser run; resuming processes untouched jobs, not interrupted applications. Individual runs can be stopped from application activity.
+
+A direct URL application tool remains available below the campaign panel.
+
+## How the agent works
+
+- **Live discovery:** Responses API web search finds individual employer/ATS listings, including startups. Extracted URLs must appear in search sources. Senior titles, duplicate URLs and unsupported URL schemes are filtered.
+- **Match check:** Before sending profile data in a campaign, the agent checks actual listing text against role, level and location, requiring quoted page evidence. Ambiguous/nonmatching listings stop that attempt. This is AI-assisted matching and can make mistakes.
+- **Form understanding:** Reads rendered controls and labels, fieldset context, native selects, radio groups, checkboxes, ARIA comboboxes, iframes and open shadow roots. Answers use saved facts first, then resume-grounded AI with evidence validation. Dropdown answers must match an offered choice.
+- **Adaptive navigation:** Recognizes common buttons and uses a bounded AI planner for unfamiliar navigation. The model chooses a visible control rather than executing arbitrary code.
+- **Human handoff:** Visible browser stays open while you solve verification or log in. AStra never solves/bypasses CAPTCHA. Ordinary missing answers are supplied in the dashboard and stay scoped to that application unless explicitly saved to your profile.
+- **Submission tracking:** Counts success only after fresh confirmation from the employer page. No automatic repeat of an uncertain final click. Canonical URL deduplication persists across runs; different aliases for the same job may still escape deduplication.
+
+## Configuration
+
+Default AI model is `gpt-4.1-mini`; set `AI_MODEL` to a model available in your API account. `AI_BASE_URL` defaults to `https://api.openai.com/v1`. Automatic discovery requires **Responses API + web_search + JSON output**; field answering also uses **Chat Completions JSON output**. A provider that merely exposes chat completions cannot run discovery.
+
+Official API references: [web search](https://developers.openai.com/api/docs/guides/tools-web-search), [structured output](https://developers.openai.com/api/docs/guides/structured-outputs).
+
+```dotenv
+AI_API_KEY=your-key-here
+AI_MODEL=gpt-4.1-mini
+AI_BASE_URL=https://api.openai.com/v1
+ASTRA_HEADLESS=false
+PORT=3000
+HOST=127.0.0.1
+```
+
+Do not commit `.env`. Keep `ASTRA_HEADLESS=false` for local use so you can complete CAPTCHA/login. `BROWSER_EXECUTABLE_PATH` can select an installed Chromium executable. Without an API key, only the direct-link workflow and saved-fact answering are available.
+
+## Scope and privacy
+
+This is a working local application agent, **not a guarantee of hands-free applications on every employer site**. Mandatory consents require an explicit saved or run-specific answer. Unsupported widgets, closed shadow DOM, inaccessible job descriptions, assessments, account creation and some site defenses require your intervention. Sensitive traits and missing qualifications are never intentionally inferred. Workday and other ATS layouts vary; there are no claims of universal site certification.
+
+The app runs on your computer rather than in a Chrome extension because this workflow needs long-running queues, local PDF parsing, controlled file uploads and an inspectable browser. The dashboard uses your ordinary browser; applications use a separate Chromium window. Login sessions are scoped to a single application; you may need to log in again for another employer/run.
+
+Profile/resume text and application page text needed for AI decisions are sent to your configured AI provider. Search sends your role preferences and excluded job URLs, not your resume/contact details. Selected profile answers and the resume are sent to employers when completing applications. The API key stays on the backend.
+
+Local profile, resume, history and screenshots are stored in Git-ignored `.astra/`; keep this directory private. Stop the server and delete it to erase local records. Restarted in-progress runs are marked interrupted and campaigns are paused. Review the employer site before retrying any interrupted/uncertain application. The UI intentionally does not offer automatic retries for previously attempted job URLs.
+
+The server binds to localhost. Do not expose it publicly without appropriate authentication and isolation. Existing `ASTRA_ACCESS_TOKEN` and exact `ASTRA_ALLOWED_ORIGINS` configuration remain available. Browser network requests block local/private destinations, but this is not a substitute for an outbound firewall in a multi-user deployment.
+
+## Development and verification
 
 ```sh
 npm ci
-# Only needed when system Chromium is unavailable:
 npx playwright install --with-deps chromium
-cp .env.example .env
+npm run build
+npm test
 npm run dev
 ```
 
-Open the Vite address printed by `npm run dev` in your local browser. The backend listens on port 3000; Vite proxies API requests. To run the built app, use `npm run build` followed by `npm start` and open the backend address printed in the terminal.
+Tests cover real Chromium form POSTs, original resume uploads, multiple application pages, native/custom dropdowns, radio groups, iframe/shadow controls, missing-answer continuation, CAPTCHA-style handoff, unfamiliar-button navigation, final confirmation and avoiding duplicate final clicks. Discovery and model decisions are mocked in automated tests; real employer acceptance and live AI quality are not proven by fixtures. Queue tests cover immediate application, caps, deduplication, pause/resume, restart recovery and empty-search limits.
 
-1. Save your real contact details, experience, work authorization, and any reusable answers in **Profile**.
-2. Upload a text-based PDF, DOCX, or TXT resume (up to 10 MB). The uploaded file is the file attached to applications. Resume text helps the AI ground its answers.
-3. Paste an application form URL, then choose **Apply & submit**. This authorizes completing and submitting that application. Review mode is available if you prefer a final checkpoint.
-4. Answer any missing questions in the dashboard. The run resumes in the same browser session. These answers stay scoped to the current application; use your profile to save reusable answers explicitly. AStra records a successful result only when it sees application confirmation.
-
-Only one application runs at a time. Do not run two applications to the same job concurrently. Cancellation during a submission or a server restart cannot undo a submitted application; check the employer's site before trying again.
-
-## AI configuration
-
-Set `AI_API_KEY` securely in your local `.env` or environment settings to enable OpenAI-compatible answering. The key stays on the backend and is never included in the dashboard or Git. The default endpoint is `https://api.openai.com/v1`, with model `gpt-4.1-mini`; override `AI_BASE_URL` and `AI_MODEL` for another compatible provider. The provider must support the chat completions API used in `server/answering.ts`.
-
-Without a key, direct profile matches and saved answers still work, and missing information is requested from you. The AI is instructed to use your actual resume and profile, select only valid options, and request input rather than invent qualifications. Review your profile and reusable answers carefully: automated submissions use those facts. Resume and profile information needed to answer a question is sent to your configured AI provider when AI is enabled.
-
-## Supported workflow and limits
-
-AStra handles standard HTML fields, native dropdowns, radio groups, checkboxes, resume uploads, ARIA comboboxes, forms in frames, and successive application steps. Its agent inspects the current page rather than relying on a single employer's template. The tests use actual Chromium and assert the employer fixture received the final application POST and resume attachment.
-
-No generic browser agent can guarantee every employer website. Site-specific widgets, closed shadow roots, account creation, logins, anti-bot challenges, assessments, and unusual validation may require manual completion or additional adapters. AStra stops or asks for input when it cannot safely proceed. It does not bypass CAPTCHAs or invent personal, demographic, legal, or qualification answers. A click on Submit without confirmation is not reported as a completed application.
-
-Browser contexts are isolated per application. Account passwords are not stored, and login sessions are not imported. The application is intended for a trusted single user. Resume files, profile data, run history, and screenshots are retained in `.astra/` (ignored by Git); delete that directory when the server is stopped to erase local records. Keep this directory private and do not commit screenshots or personal data.
-
-The server binds to localhost by default. To expose it beyond localhost, set a strong `ASTRA_ACCESS_TOKEN` and `ASTRA_ALLOWED_ORIGINS` (comma-separated exact origins), and use HTTPS through your deployment's reverse proxy. Application browser requests reject local/private addresses. This guard does not replace an isolated runtime or outbound firewall for a public multi-user deployment.
-
-## Development
-
-```sh
-npm run build       # TypeScript and production frontend bundle
-npm test            # Unit tests and real-browser submission fixtures
-npm run test:browser
-```
-
-The browser uses `BROWSER_EXECUTABLE_PATH`, `/usr/bin/chromium` when present, or Playwright's downloaded Chromium. The source is split into `web/` (React dashboard), `server/` (API, persistence, browser agent, answering), `shared/` (contracts), and `tests/` (fixtures and regression tests). GitHub Actions installs Chromium and runs the build and tests.
-
-Each cloud task already has an isolated checkout. Use the existing `/workspace/AStra` checkout; do not create a worktree unless explicitly requested. Start the server again in each new task because live processes do not survive environment snapshots.
+Source: `web/` dashboard, `server/discovery.ts` search, `server/campaign.ts` queue, `server/agent.ts` forms, `server/navigation.ts` navigation/handoff, `server/answering.ts` grounded answers. GitHub Actions runs the build and tests.

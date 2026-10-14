@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { BrowserAgentOptions, Question } from '../shared/types';
+import { challengePresent, checkJobFit, planNavigation } from './navigation.js';
 import { answerQuestion, needsExplicitAnswer, normalize } from './answering';
 
 type Field = Question & {
@@ -93,7 +94,9 @@ async function discover(frame: Frame, prefix: string): Promise<Field[]> {
       if (!label) label = `${kind} field ${results.length + 1}`;
       const name = el.getAttribute('name') || el.id || label;
       const key = `${name}:${label}`.replace(/\s+/g, ' ').slice(0, 300);
-      results.push({ key, label, type: kind, kind, required, options, value, choices, selector: tag(el) });
+      const section = el.closest('fieldset, section, [role="group"], [role="radiogroup"]');
+      const context = section ? text(section).slice(0, 1000) : '';
+      results.push({ context, key, label, type: kind, kind, required, options, value, choices, selector: tag(el) });
     }
     return results;
   }, prefix);
@@ -257,7 +260,7 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
     await log(message, 'warning');
     const answers = await waiting;
     throwIfCancelled(signal);
-    for (const [key, value] of Object.entries(answers)) if (typeof value === 'string') profile.answers[key] = value;
+    for (const [key, value] of Object.entries(answers)) if (typeof value === 'string' && !key.startsWith('__')) profile.answers[key] = value;
     run.questions = [];
     run.status = 'running';
     await onUpdate(run);
@@ -271,7 +274,7 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
     run.status = 'running';
     await log('Opening the job application in a private browser.');
     const executablePath = process.env.BROWSER_EXECUTABLE_PATH || (existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : undefined);
-    browser = await chromium.launch({ headless: true, executablePath, args: ['--disable-dev-shm-usage'] });
+    browser = await chromium.launch({ headless: process.env.ASTRA_HEADLESS === 'true' || process.env.NODE_ENV === 'test', executablePath, args: ['--disable-dev-shm-usage'] }).catch(() => { throw new Error('The application browser could not start. Run npx playwright install chromium, check BROWSER_EXECUTABLE_PATH, and use a desktop session for visible browser mode.'); });
     const context = await browser.newContext({ viewport: { width: 1366, height: 1000 }, acceptDownloads: false, serviceWorkers: 'block' });
     context.setDefaultTimeout(12_000);
     context.setDefaultNavigationTimeout(30_000);
@@ -296,6 +299,7 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
     page = await context.newPage();
     await page.goto(run.url, { waitUntil: 'domcontentloaded' });
     await page.waitForLoadState('networkidle', { timeout: 4_000 }).catch(() => {});
+    let fitChecked = false;
     let noProgress = 0;
     let previousState = '';
     let activeMs = 0;
@@ -305,12 +309,15 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
       if (page.isClosed()) throw new Error('The application browser was closed.');
       await assertUrl(page.url());
       const body = await visibleText(page);
-      const passwordVisible = await page.locator('input[type="password"]:visible').count();
-      const captchaVisible = await page.locator('iframe[src*="recaptcha"]:visible, iframe[src*="hcaptcha"]:visible, [data-sitekey]:visible').count();
-      if (passwordVisible || captchaVisible || /(?:verify (?:that )?you(?: are|'re) human|complete the captcha|checking your browser)/i.test(body)) {
-        const issue = passwordVisible ? 'This application requires a login. Authenticated sites are not supported in this isolated browser; use a public application link or complete this step on the employer website.' : 'This application requires a CAPTCHA or human verification. Complete the application on the employer website or use a link without this challenge.';
-        await pause([{ key: '__challenge', label: issue, type: 'text', options: [], required: true }], issue);
-        throw new Error(issue);
+      if (await challengePresent(page)) {
+        await page.bringToFront();
+        await pause([{ key: '__challenge', label: 'Complete CAPTCHA, login, or verification in the AStra browser window. Then continue here.', type: 'manual', options: ['Continue'], required: true }], 'Human verification needed. The browser stays open; complete the challenge there and click Continue in AStra.');
+        continue;
+      }
+      if (run.searchPreferences && !fitChecked) {
+        await checkJobFit(page, run.searchPreferences, signal);
+        fitChecked = true;
+        await log('Verified that the live listing matches your role, level and location.');
       }
       const fields: Field[] = [];
       for (const frame of page.frames()) {
@@ -381,13 +388,17 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
         }
         continue;
       }
-      const action = await findAction(page);
+      const action = await findAction(page) || await planNavigation(page, signal);
       const state = `${page.url()}|${fields.map((field) => `${field.key}:${field.value}`).join('|')}|${action?.label}`;
       noProgress = state === previousState && !filled ? noProgress + 1 : 0;
       previousState = state;
-      if (noProgress > 2) throw new Error('The application made no progress. The employer may use an unsupported control or have unresolved validation errors.');
+      if (noProgress > 2) {
+        await pause([{ key: '__manual', label: 'Resolve the blocked control in the AStra browser, without submitting, then continue.', type: 'manual', options: ['Continue'], required: true }], 'This page is not progressing. Please resolve the highlighted fields in the browser window.');
+        noProgress = 0; previousState = ''; completed.clear(); continue;
+      }
       if (!action) {
-        throw new Error('No usable application, continue, or submit button was found. Check that this URL is a public application form.');
+        await pause([{ key: '__manual', label: 'Open the application or complete the unusual control in the AStra browser without submitting. Then continue.', type: 'manual', options: ['Continue'], required: true }], 'No usable navigation control was found. Please move to the application form in the open browser.');
+        continue;
       }
       const isFinal = action.kind === 'submit' || action.kind === 'apply' && (fields.length > 0 || submittedAttempt);
       if (isFinal) {
@@ -423,7 +434,7 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
       if (isFinal) {
         // Final clicks can have slow asynchronous results. Poll for evidence and
         // never click again: a second POST could create a duplicate application.
-        const deadline = Date.now() + 15_000;
+        let deadline = Date.now() + 15_000;
         do {
           throwIfCancelled(signal);
           await assertUrl(page.url());
@@ -434,6 +445,11 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
             await screenshot();
             await log('Application submission confirmed by the employer page.', 'action');
             return;
+          }
+          if (await challengePresent(page)) {
+            await page.bringToFront();
+            await pause([{ key: '__challenge', label: 'Complete verification in the AStra browser. If the site requires a final click, complete it there, then continue.', type: 'manual', options: ['Continue'], required: true }], 'Verification appeared after submission. Finish it in the open browser; AStra will check for confirmation without repeating the submit click.');
+            deadline = Date.now() + 15_000;
           }
           if (negativeSubmission.test(await visibleText(page))) break;
           await page.waitForTimeout(350);
