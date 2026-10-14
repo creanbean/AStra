@@ -224,7 +224,7 @@ function fixture(): ExpressApp {
     record('/optional-demographic-defaults', req.body);
     res.redirect(303, '/complete');
   });
-  app.get('/semantic-form', (_req, res) => res.send(document(`<h1>Electrical Engineer I</h1><p>Open role for new graduates in New Jersey.</p><form method="post" action="/semantic-submit">${identityFields}<button type="button" onclick="this.form.submit()">Send my candidacy to the hiring team</button></form>`)));
+  app.get('/semantic-form', (_req, res) => res.send(document(`<h1>Electrical Engineer I</h1><p>Open role for new graduates in New Jersey.</p><form method="post" action="/semantic-submit">${identityFields}<label>What is your primary programming language?<select name="language" required><option value="">Select</option><option>TypeScript</option><option>Python</option></select></label><button type="button" onclick="this.form.submit()">Send my candidacy to the hiring team</button></form>`)));
   app.post('/semantic-submit', (req, res) => { record('/semantic-submit', req.body); res.redirect(303, '/complete'); });
   app.get('/complete', (_req, res) => res.send(document('<h1>Application submitted successfully</h1><p>Thank you for applying. Your application has been received.</p>')));
   return app;
@@ -282,6 +282,7 @@ describe('browser application agent against a real local application server', ()
     vi.stubEnv('AI_API_KEY', 'fixture-key');
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
       const request = JSON.parse(String(init?.body));
+      if (request.messages) return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ answer: 'TypeScript', evidence: 'TypeScript experience' }) } }] }));
       const input = JSON.parse(request.input);
       const answer = request.instructions.startsWith('Check this job page')
         ? { matches: true, evidence: 'Open role for new graduates in New Jersey.', reason: 'Fits criteria' }
@@ -292,9 +293,10 @@ describe('browser application agent against a real local application server', ()
       const run: ApplicationRun = { id: crypto.randomUUID(), url: origin + '/semantic-form', autoSubmit: true, status: 'queued', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), events: [], questions: [], searchPreferences: { description: 'Electrical engineering', level: 'entry-level', location: 'New Jersey', maxApplications: 1, maxSearchRounds: 1, autoSubmit: true } };
       const result = await application('/semantic-form', { run });
       expect(result.run.status, JSON.stringify(run.events)).toBe('submitted');
-      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      expect(fetchSpy).toHaveBeenCalledTimes(3);
       expect(submissions).toHaveLength(1);
       expect(submissions[0].fields.email).toBe(profile.email);
+      expect(submissions[0].fields.language).toBe('TypeScript');
     } finally { fetchSpy.mockRestore(); vi.stubEnv('AI_API_KEY', ''); }
   });
 

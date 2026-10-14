@@ -64,6 +64,20 @@ describe('truthful applicant answers', () => {
     expect(request.messages[1].content).not.toContain('/tmp/private.pdf');
   });
 
+  it('serializes real browser fields without cyclic Playwright runtime objects', async () => {
+    vi.stubEnv('AI_API_KEY', 'test-key');
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ answer: 'C++', evidence: 'C++ firmware' }) } }] })));
+    const frame: Record<string, unknown> = {}; frame.parent = frame;
+    const field = { ...question('Which language have you used?', ['C++', 'Java']), frame, selector: '#private-runtime', context: 'Engineering skills' };
+    const result = await answerQuestion(field, { ...profile, skills: 'C++ firmware' });
+    expect(result).toEqual({ value: 'C++', source: 'ai' });
+    const request = JSON.parse(String(fetchSpy.mock.calls[0][1]?.body));
+    const sent = JSON.parse(request.messages[1].content);
+    expect(sent.question.context).toBe('Engineering skills');
+    expect(sent.question.frame).toBeUndefined();
+    expect(sent.question.selector).toBeUndefined();
+  });
+
   it('does not send a key through an insecure remote endpoint', async () => {
     vi.stubEnv('AI_API_KEY', 'test-key');
     vi.stubEnv('AI_BASE_URL', 'http://untrusted.example/v1');

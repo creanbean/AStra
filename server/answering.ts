@@ -118,6 +118,9 @@ export function deterministicAnswer(question: Question, profile: Profile): Answe
 }
 
 export async function answerQuestion(question: Question, profile: Profile, signal?: AbortSignal): Promise<AnswerResult> {
+  // Browser fields carry a cyclic Playwright Frame. Send only question data,
+  // never runtime internals or locators, to the model.
+  question = { key: question.key, label: question.label, type: question.type, options: question.options, required: question.required, context: question.context };
   const direct = deterministicAnswer(question, profile);
   if (direct.value !== undefined || direct.source === 'saved' || needsExplicitAnswer(question.label) || !process.env.AI_API_KEY) return direct;
   const source = JSON.stringify({ ...profile, resume: profile.resume?.text ?? '' });
