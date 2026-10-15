@@ -7,8 +7,9 @@ export async function responses(instructions: string, input: unknown, signal: Ab
   const response = await fetch(url, {
     method: 'POST', redirect: 'error', signal: AbortSignal.any([signal, AbortSignal.timeout(120_000)]),
     headers: { Authorization: `Bearer ${process.env.AI_API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: process.env.AI_MODEL || 'gpt-4.1-mini', store: false, instructions,
-      input: (search ? '' : 'Return only a JSON object.\n') + JSON.stringify(input), max_output_tokens: 5000,
+    body: JSON.stringify({ model: process.env.AI_MODEL || 'gpt-4.1-mini', store: false,
+      instructions: search ? instructions : `${instructions} Return a valid JSON object.`,
+      input: JSON.stringify(input), max_output_tokens: 5000,
       ...(search ? { tools: [{ type: 'web_search' }], tool_choice: 'required', include: ['web_search_call.action.sources'] } : { text: { format: { type: 'json_object' } } }),
     }),
   });
