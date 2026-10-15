@@ -8,11 +8,16 @@ export async function responses(instructions: string, input: unknown, signal: Ab
     method: 'POST', redirect: 'error', signal: AbortSignal.any([signal, AbortSignal.timeout(120_000)]),
     headers: { Authorization: `Bearer ${process.env.AI_API_KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ model: process.env.AI_MODEL || 'gpt-4.1-mini', store: false, instructions,
-      input: JSON.stringify(input), max_output_tokens: 5000,
+      input: (search ? '' : 'Return only a JSON object.\n') + JSON.stringify(input), max_output_tokens: 5000,
       ...(search ? { tools: [{ type: 'web_search' }], tool_choice: 'required', include: ['web_search_call.action.sources'] } : { text: { format: { type: 'json_object' } } }),
     }),
   });
-  if (!response.ok) throw new Error(`AI request failed (HTTP ${response.status}). Check API key, model access, quota, and Responses/web-search support.`);
+  if (!response.ok) {
+    const apiError = await response.json().catch(() => null) as { error?: { message?: string } } | null;
+    const rawDetail = apiError?.error?.message || 'The provider returned no error details.';
+    const safeDetail = rawDetail.replace(/sk-(?:proj-)?[A-Za-z0-9_-]+/g, '[REDACTED API KEY]').slice(0, 600);
+    throw new Error(`AI request failed (HTTP ${response.status}): ${safeDetail}`);
+  }
   const data = await response.json() as any;
   if (data.status === 'incomplete' || data.error) throw new Error('AI response was incomplete. Try a smaller request or another supported model.');
   const messages = (data.output || []).filter((x: any) => x.type === 'message').flatMap((x: any) => x.content || []);
