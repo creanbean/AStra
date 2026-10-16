@@ -283,7 +283,7 @@ describe('browser application agent against a real local application server', ()
     vi.stubEnv('AI_API_KEY', 'fixture-key');
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
       const request = JSON.parse(String(init?.body));
-      if (request.messages) return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ answer: 'TypeScript', evidence: 'TypeScript experience' }) } }] }));
+      if (request.instructions.startsWith('You help an applicant')) return new Response(JSON.stringify({ status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify({ answer: 'TypeScript', evidence: 'TypeScript experience' }) }] }] }));
       const input = JSON.parse(request.input);
       const answer = request.instructions.startsWith('Check this job page')
         ? { matches: true, evidence: 'Open role for new graduates in New Jersey.', reason: 'Fits criteria' }
