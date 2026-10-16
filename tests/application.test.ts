@@ -166,6 +166,76 @@ function fixture(): ExpressApp {
     if (req.body.authorized !== 'yes') return res.status(422).send(document('<p role="alert">Missing work authorization</p>'));
     res.redirect(303, '/complete');
   });
+
+  app.get('/multi-select', (_req, res) => res.send(document(`
+    <h1>Engineer application</h1>
+    <form method="post" action="/multi-select">${identityFields}
+      <label>Technical skills
+        <select name="languages" multiple required>
+          <option value="ts">TypeScript</option><option value="react">React</option><option value="py">Python</option>
+        </select>
+      </label><button type="submit">Submit application</button>
+    </form>`)));
+  app.post('/multi-select', (req, res) => {
+    record('/multi-select', req.body);
+    const answers = Array.isArray(req.body.languages) ? req.body.languages : [req.body.languages];
+    if (!answers.includes('ts') || !answers.includes('react') || answers.includes('py')) return res.status(422).send(document('<p role="alert">Incorrect skills</p>'));
+    res.redirect(303, '/complete');
+  });
+
+  app.get('/unsupported-multi', (_req, res) => res.send(document(`
+    <h1>Engineer application</h1><form method="post" action="/unsupported-multi">${identityFields}
+      <div role="listbox" aria-multiselectable="true" aria-required="true" aria-label="Available work shifts">
+        <div role="option" aria-selected="false">Morning</div><div role="option" aria-selected="false">Evening</div>
+      </div>
+      <button type="submit">Submit application</button>
+    </form>`)));
+  app.post('/unsupported-multi', (req, res) => { record('/unsupported-multi', req.body); res.redirect(303, '/complete'); });
+
+  app.get('/conditional-fields', (_req, res) => res.send(document(`
+    <h1>Engineer application</h1><form method="post" action="/conditional-fields">${identityFields}
+      <label>Country <select name="country" id="country" required>
+        <option value="">Choose an answer</option><option value="United States">United States</option>
+      </select></label>
+      <div id="conditional"></div>
+      <button type="submit">Submit application</button></form>
+      <script>
+        document.getElementById('country').addEventListener('change', () => {
+          document.getElementById('conditional').innerHTML = '<label>City <input name="city" required></label>';
+        });
+      </script>`)));
+  app.post('/conditional-fields', (req, res) => {
+    record('/conditional-fields', req.body);
+    if (req.body.country !== 'United States' || req.body.city !== 'New York') return res.status(422).send(document('<p role="alert">Location missing</p>'));
+    res.redirect(303, '/complete');
+  });
+
+  app.get('/react-toggle', (_req, res) => res.send(document(`
+    <h1>Engineer application</h1><form method="post" action="/react-toggle">${identityFields}
+      <label id="react-label">Are you legally authorized to work in the United States?</label>
+      <div data-field>
+        <input role="combobox" id="react-select-input" aria-labelledby="react-label" aria-controls="portal-options" aria-required="true" aria-expanded="false" autocomplete="off">
+        <button type="button" id="flyout" aria-label="Toggle flyout">▼</button>
+        <input name="authorized" type="hidden" id="react-value">
+      </div>
+      <div id="portal-options" role="listbox" hidden><div role="option">Yes</div><div role="option">No</div></div>
+      <button type="submit">Submit application</button></form>
+      <script>
+        const flyout=document.getElementById('flyout');
+        const menu=document.getElementById('portal-options');
+        flyout.addEventListener('click',()=>{menu.hidden=false;document.getElementById('react-select-input').setAttribute('aria-expanded','true');});
+        for(const option of menu.children) option.addEventListener('click',()=>{
+          document.getElementById('react-value').value=option.textContent.toLowerCase();
+          document.getElementById('react-select-input').setAttribute('aria-expanded','false');
+          menu.hidden=true;
+        });
+      </script>`)));
+  app.post('/react-toggle', (req, res) => {
+    record('/react-toggle', req.body);
+    if (req.body.authorized !== 'yes') return res.status(422).send(document('<p role="alert">Missing authorization</p>'));
+    res.redirect(303, '/complete');
+  });
+
   app.get('/review', (_req, res) => res.send(document(`
     <h1>Apply for Engineer</h1><form method="post" action="/review">${identityFields}<button type="submit">Submit application</button></form>`)));
   app.post('/review', (req, res) => { record('/review', req.body); res.redirect(303, '/complete'); });
@@ -392,6 +462,44 @@ describe('browser application agent against a real local application server', ()
     expect(submissions).toHaveLength(1);
     expect(submissions[0].fields.authorized).toBe('yes');
   });
+
+  it('selects and verifies multiple native options from explicit saved applicant facts', async () => {
+    const candidate = structuredClone(profile);
+    candidate.answers['Technical skills'] = 'TypeScript; React';
+    const { run } = await application('/multi-select', { profile: candidate });
+    expect(run.status, JSON.stringify(run.events)).toBe('submitted');
+    expect(run.compatibility?.status).toBe('compatible');
+    expect(submissions).toHaveLength(1);
+    expect(submissions[0].fields.languages).toEqual(['ts', 'react']);
+  });
+
+  it('detects unsupported required widgets and never auto-submits campaign applications', async () => {
+    const run: ApplicationRun = {
+      id: crypto.randomUUID(), url: `${origin}/unsupported-multi`, campaignId: 'fixture-campaign',
+      autoSubmit: true, status: 'queued', createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(), events: [], questions: [],
+    };
+    const result = await application('/unsupported-multi', { run });
+    expect(result.run.status).toBe('failed');
+    expect(result.run.compatibility?.status).toBe('needs_review');
+    expect(result.run.compatibility?.issues.some(issue => /Specialized selection control/.test(issue))).toBe(true);
+    expect(submissions).toHaveLength(0);
+  });
+
+  it('detects conditionally injected required fields before submission', async () => {
+    const { run } = await application('/conditional-fields');
+    expect(run.status, JSON.stringify(run.events)).toBe('submitted');
+    expect(submissions).toHaveLength(1);
+    expect(submissions[0].fields.city).toBe('New York');
+  });
+
+  it('opens portal-rendered dropdowns through a sibling React-style toggle', async () => {
+    const { run } = await application('/react-toggle');
+    expect(run.status, JSON.stringify(run.events)).toBe('submitted');
+    expect(submissions).toHaveLength(1);
+    expect(submissions[0].fields.authorized).toBe('yes');
+  });
+
   it('waits for approval in review mode before posting the final application', async () => {
     const run: ApplicationRun = {
       id: crypto.randomUUID(), url: `${origin}/review`, autoSubmit: false, status: 'queued',
