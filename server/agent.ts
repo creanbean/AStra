@@ -137,6 +137,16 @@ async function customOptions(field: Field): Promise<void> {
     await locator.click({ timeout: 5_000 });
     available = await visibleDropdownChoices(field);
   }
+  if (!available.length) {
+    // React-select and some Greenhouse widgets open via a sibling chevron.
+    const parent = locator.locator('xpath=..');
+    const toggle = parent.locator('button[aria-label*="Toggle"], button[aria-label*="Open"], button[aria-label*="Show"], [aria-label="Toggle flyout"]');
+    if (await toggle.count()) {
+      await toggle.first().click({ timeout: 3_000 });
+      await field.frame.page().waitForTimeout(200);
+      available = await visibleDropdownChoices(field);
+    }
+  }
   // Leave the popup open; some non-native menus do not implement Escape,
   // and clicking their trigger a second time closes it instead of selecting.
   field.options = available.map((option) => option.label);
@@ -185,7 +195,7 @@ async function fillField(field: Field, answer: string): Promise<void> {
   } else if (field.kind === 'combobox') {
     let choices = await visibleDropdownChoices(field);
     if (!choices.length) {
-      await locator.click();
+      await customOptions(field);
       choices = await visibleDropdownChoices(field);
     }
     let matching = choices.filter((candidate) => normalize(candidate.label) === normalize(answer));
@@ -195,6 +205,14 @@ async function fillField(field: Field, answer: string): Promise<void> {
       await field.frame.page().waitForTimeout(200);
       choices = await visibleDropdownChoices(field);
       matching = choices.filter((candidate) => normalize(candidate.label) === normalize(answer));
+    }
+    if (matching.length !== 1) {
+      // Async portals can populate after a network request. Do not use positional guesses.
+      for (let retry = 0; retry < 5 && matching.length !== 1; retry++) {
+        await field.frame.page().waitForTimeout(250);
+        choices = await visibleDropdownChoices(field);
+        matching = choices.filter((candidate) => normalize(candidate.label) === normalize(answer));
+      }
     }
     if (matching.length !== 1) throw new Error('The custom dropdown did not expose one unambiguous matching option.');
     await matching[0].locator.click();
