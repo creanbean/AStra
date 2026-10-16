@@ -4,7 +4,7 @@ import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { BrowserAgentOptions, Question } from '../shared/types';
 import { challengePresent, checkJobFit, planNavigation } from './navigation.js';
-import { answerQuestion, needsExplicitAnswer, normalize } from './answering';
+import { answerQuestion, matchOption, needsExplicitAnswer, normalize } from './answering';
 import { assessCompatibility } from './compatibility.js';
 
 type Field = Question & {
@@ -83,7 +83,7 @@ async function discover(frame: Frame, prefix: string): Promise<Field[]> {
         choices = members.map((member) => ({ label: labelOf(member) || text(member), selector: tag(member), value: text(member) }));
         options = choices.map((choice) => choice.label);
         value = choices.find((choice) => members.find((member) => member.getAttribute('data-astra-control') === choice.selector.match(/"([^\"]+)"/)?.[1])?.getAttribute('aria-checked') === 'true')?.label || '';
-      } else if (kind === 'select') {
+      } else if (kind === 'select' || kind === 'select-multiple') {
         options = [...(el as HTMLSelectElement).options].filter((option) => !option.disabled && option.value !== '' && !/^(select|choose|please select|please choose)(\b|\.)/i.test(option.label)).map((option) => option.label.trim());
         choices = [...(el as HTMLSelectElement).options].map((option) => ({ label: option.label.trim(), value: option.value, selector: '' }));
       } else if (kind === 'checkbox') {
@@ -142,9 +142,32 @@ async function customOptions(field: Field): Promise<void> {
   field.options = available.map((option) => option.label);
 }
 
+/** Multiple answers are permitted only when grounded in saved applicant facts. */
+function multipleAnswers(field: Field, profile: BrowserAgentOptions['profile']): string[] {
+  const direct = profile.answers[field.key] ?? profile.answers[field.label] ??
+    Object.entries(profile.answers).find(([key]) => normalize(key) === normalize(field.label))?.[1];
+  const isSkills = /\b(skill|technical|programming language|technology|framework|tool)s?\b/i.test(field.label);
+  const raw = direct || (isSkills ? profile.skills : '');
+  if (!raw?.trim()) return [];
+  let inputs: string[];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    inputs = Array.isArray(parsed) && parsed.every((item) => typeof item === 'string') ? parsed as string[] : [raw];
+  } catch { inputs = [raw]; }
+  if (inputs.length === 1 && !matchOption(inputs[0], field.options)) inputs = inputs[0].split(/[;,\n]/);
+  const matched = inputs.map((input) => matchOption(input.trim(), field.options));
+  if (direct && matched.some((item) => !item)) return [];
+  return [...new Set(matched.filter((item): item is string => !!item))];
+}
+
 async function fillField(field: Field, answer: string): Promise<void> {
   const locator = field.frame.locator(field.selector);
-  if (field.kind === 'select') {
+  if (field.kind === 'select-multiple') {
+    const labels = answer.split(';').map((value) => value.trim()).filter(Boolean);
+    const values = labels.map((label) => field.choices?.find((choice) => choice.label === label)?.value);
+    if (!labels.length || values.some((value) => value === undefined)) throw new Error('Multiple choice answers do not match offered options.');
+    await locator.selectOption(values as string[]);
+  } else if (field.kind === 'select') {
     const choice = field.choices?.find((candidate) => candidate.label === answer);
     if (!choice) throw new Error('The requested select choice is no longer available.');
     await locator.selectOption({ value: choice.value });
@@ -186,6 +209,13 @@ async function hasRenderedAnswer(field: Field, answer: string): Promise<boolean>
   try {
     const locator = field.frame.locator(field.selector);
     if (field.kind === 'file') return locator.evaluate(el => !!(el as HTMLInputElement).files?.length);
+    if (field.kind === 'select-multiple') {
+      const labels = answer.split(';').map((value) => value.trim()).filter(Boolean);
+      const values = labels.map((label) => field.choices?.find((choice) => choice.label === label)?.value);
+      if (!values.length || values.some((value) => value === undefined)) return false;
+      const selected = await locator.evaluate((el) => [...(el as HTMLSelectElement).selectedOptions].map((option) => option.value));
+      return selected.length === values.length && values.every((value) => selected.includes(value!));
+    }
     if (field.kind === 'select') {
       const choice = field.choices?.find(c => c.label === answer);
       return !!choice && await locator.inputValue() === choice.value;
@@ -444,7 +474,22 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
           else ignored.add(field.key);
           continue;
         }
-        if (field.kind === 'password' || field.kind === 'select-multiple') continue;
+        if (field.kind === 'password') continue;
+        if (field.kind === 'select-multiple') {
+          const answers = multipleAnswers(field, profile);
+          if (answers.length) {
+            const selection = answers.join('; ');
+            await fillField(field, selection);
+            if (!await hasRenderedAnswer(field, selection)) throw new Error('Multiple selection was not retained.');
+            completed.set(field.selector, selection);
+            filled++;
+            await log('Selected multiple choices grounded in your saved profile.', 'action');
+          } else if (field.required) {
+            if (run.campaignId) throw new Error('A required multi-select needs a saved, factual answer. No application was submitted.');
+            unresolved.push({ key: field.key, label: `${field.label} — enter one or more offered choices separated by semicolons.`, type: 'select-multiple', options: field.options, required: true });
+          } else ignored.add(field.key);
+          continue;
+        }
         if (field.kind === 'combobox' && !field.options.length) await customOptions(field).catch(() => {});
         const answer = await answerQuestion(field, profile, signal);
         // Do not silently skip optional fields when the configured AI provider failed.
