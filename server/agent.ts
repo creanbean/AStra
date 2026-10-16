@@ -430,11 +430,6 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
       if (page.isClosed()) throw new Error('The application browser was closed.');
       await assertUrl(page.url());
       const body = await visibleText(page);
-      if (await challengePresent(page)) {
-        await page.bringToFront();
-        await pause([{ key: '__challenge', label: 'Complete CAPTCHA, login, or verification in the AStra browser window. Then continue here.', type: 'manual', options: ['Continue'], required: true }], 'Human verification needed. The browser stays open; complete the challenge there and click Continue in AStra.');
-        continue;
-      }
       if (run.searchPreferences && !fitChecked) {
         await checkJobFit(page, run.searchPreferences, signal);
         fitChecked = true;
@@ -552,6 +547,14 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
           const field = fields.find((f) => f.key === q.key);
           if (field) completed.delete(field.selector);
         }
+        continue;
+      }
+      // Fill application fields first. A real verification gate is only a
+      // blocker when proceeding to the next step or submitting the form.
+      // Passive reCAPTCHA badges never stop ordinary form completion.
+      if (await challengePresent(page)) {
+        await page.bringToFront();
+        await pause([{ key: '__challenge', label: 'The application fields have been filled where possible. Complete the visible CAPTCHA, login, or verification in the AStra browser window, then continue here.', type: 'manual', options: ['Continue'], required: true }], 'Visible human verification is required before proceeding. AStra has already attempted to fill the form.');
         continue;
       }
       const action = await findAction(page) || await planNavigation(page, signal);
