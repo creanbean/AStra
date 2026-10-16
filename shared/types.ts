@@ -50,6 +50,13 @@ export interface ApplicationRun {
   searchPreferences?: SearchPreferences;
   result?: string;
 }
+/** Only known pre-submission failures may be retried. A final click or uncertain result blocks retries. */
+export function safeToRetry(run: ApplicationRun): boolean {
+  return run.status === 'failed' &&
+    !run.events.some(event => /submitting the completed application|submission confirmed|final submit|submission authorized/i.test(event.message)) &&
+    !/submission is uncertain|final action was clicked|employer did not confirm submission/i.test(run.result || '');
+}
+
 export interface BrowserAgentOptions {
   run: ApplicationRun;
   profile: Profile;
@@ -83,6 +90,8 @@ export interface JobCandidate {
   reason: string;
   state: 'queued' | 'running' | 'submitted' | 'failed' | 'skipped';
   runId?: string;
+  /** Last verified result from the browser attempt, not a job-fit rationale. */
+  outcome?: string;
 }
 export interface Campaign {
   id: string;

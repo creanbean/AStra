@@ -1,6 +1,13 @@
 import type { Frame, Page } from 'playwright';
 import type { CompatibilityReport } from '../shared/types.js';
 
+/** Security widgets and verification frames are not employer application forms. */
+export function isApplicationFrame(frame: Frame): boolean {
+  const url = frame.url();
+  if (!url || url === 'about:blank') return true;
+  return !/(?:google\.[^/]+|recaptcha\.net)\/recaptcha\/|\/recaptcha\/(?:api2|enterprise)\/|hcaptcha\.com\/|challenges\.cloudflare\.com\/|arkoselabs\.com\/|funcaptcha\.com\/|captcha-delivery\.com\//i.test(url);
+}
+
 export interface AuditedField {
   kind: string;
   label: string;
@@ -80,6 +87,7 @@ export async function assessCompatibility(page: Page, fields: AuditedField[], di
     if (field.required && !field.label.trim()) issues.push('Required field has no accessible label.');
   }
   for (const frame of page.frames()) {
+    if (!isApplicationFrame(frame)) continue;
     try {
       issues.push(...await findUnsupported(frame));
     } catch {
@@ -87,7 +95,7 @@ export async function assessCompatibility(page: Page, fields: AuditedField[], di
     }
   }
   return {
-    platform: identifyATS(page.frames().map(frame => frame.url())),
+    platform: identifyATS(page.frames().filter(isApplicationFrame).map(frame => frame.url())),
     status: issues.length ? 'needs_review' : fields.length ? 'compatible' : 'checking',
     detectedFields: fields.length,
     issues: [...new Set(issues)].slice(0, 15),

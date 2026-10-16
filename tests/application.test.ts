@@ -43,7 +43,7 @@ function fixture(): ExpressApp {
     <script>const poll=setInterval(async()=>{if((await (await fetch('/human-status')).json()).solved){
       document.querySelector('[name="g-recaptcha-response"]').value='user-completed-fixture';
       document.querySelector('#gate').remove();clearInterval(poll);}},50);</script>`)); });
-  app.get('/recaptcha/api2/anchor', (_req, res) => res.send(document('<p>reCAPTCHA widget background frame</p>')));
+  app.get('/recaptcha/api2/anchor', (_req, res) => res.send(document('<p>reCAPTCHA widget background frame</p><input required aria-required="true" aria-label="CAPTCHA internal input">')));
   app.get('/passive-recaptcha', (_req, res) => res.send(document(`
     <h1>Apply for Electrical Engineer</h1>
     <p>This site is protected by reCAPTCHA. You may need to verify your email after applying.</p>
@@ -75,6 +75,41 @@ function fixture(): ExpressApp {
   app.get('/human-status', (_req, res) => res.json({ solved: humanSolved }));
   app.post('/human-solve', (_req, res) => { humanSolved = true; res.json({ ok: true }); });
   app.post('/human-submit', (req, res) => { record('/human-submit', req.body); res.redirect(303, '/complete'); });
+
+  app.get('/landing-apply-now', (_req, res) => res.send(document(`
+    <h1>Electrical Engineer I</h1>
+    <p>Open role for new graduates in New Jersey. Work on controls and power distribution.</p>
+    <div id="listing">
+      <label>Receive job alerts <input name="job-alerts" required></label>
+      <button type="button" id="generic-next">Next</button>
+      <button type="button" id="open-application" onclick="document.getElementById('listing').hidden=true;document.getElementById('actual-form').hidden=false">Apply Now</button>
+    </div>
+    <form method="post" action="/landing-apply-now" id="actual-form" hidden>
+      ${identityFields}
+      <label>Phone number <input type="tel" name="phone" required></label>
+      <button type="submit">Submit application</button>
+    </form>`)));
+  app.post('/landing-apply-now', (req, res) => {
+    record('/landing-apply-now', req.body);
+    if (req.body.email !== 'alex.rivera@example.com' || req.body.phone !== '+12025550123') {
+      return res.status(422).send(document('<p role="alert">Form was not filled</p>'));
+    }
+    res.redirect(303, '/complete');
+  });
+  app.get('/captcha-required-frame', (_req, res) => res.send(document('<input required aria-required="true" aria-label="CAPTCHA internal input">')));
+  app.get('/landing-with-security-frame', (_req, res) => res.send(document(`
+    <h1>Electrical Engineer opening</h1>
+    <div class="grecaptcha-badge" style="position:fixed;bottom:0;right:0">
+      <iframe src="/recaptcha/api2/anchor?size=invisible" width="256" height="60"></iframe>
+    </div>
+    <form method="post" action="/landing-with-security-frame">${identityFields}
+      <button type="submit">Submit application</button>
+    </form>`)));
+  app.post('/landing-with-security-frame', (req, res) => {
+    record('/landing-with-security-frame', req.body);
+    if (req.body.email !== 'alex.rivera@example.com') return res.status(422).send(document('<p role="alert">Email missing</p>'));
+    res.redirect(303, '/complete');
+  });
 
   app.get('/workflow/step-1', (_req, res) => res.send(document(`
     <h1>Apply for Software Engineer</h1><p>Step 1 of 2: Contact details</p>
@@ -514,6 +549,23 @@ describe('browser application agent against a real local application server', ()
     expect(submissions[0].fields.email).toBe(profile.email);
   });
 
+  it('clicks Apply Now before filling and ignores unrelated job alerts and Next controls', async () => {
+    const { run } = await application('/landing-apply-now');
+    expect(run.status, JSON.stringify(run.events)).toBe('submitted');
+    expect(run.events.some(event => /Opening the application form via "Apply Now"/.test(event.message))).toBe(true);
+    expect(submissions).toHaveLength(1);
+    expect(submissions[0].fields).toMatchObject({ email: profile.email, phone: profile.phone });
+    expect(submissions[0].fields['job-alerts']).toBeUndefined();
+  });
+
+  it('ignores required controls inside background verification frames when auditing employer forms', async () => {
+    const { run } = await application('/landing-with-security-frame');
+    expect(run.status, JSON.stringify(run.events)).toBe('submitted');
+    expect(run.compatibility?.status).toBe('compatible');
+    expect(run.compatibility?.issues).toEqual([]);
+    expect(submissions).toHaveLength(1);
+  });
+
   it('submits a complete multistep application with the actual resume, dropdowns, radios, and consent', async () => {
     const { run, updates } = await application('/workflow/step-1');
     expect(run.status, JSON.stringify(run.events)).toBe('submitted');
@@ -562,7 +614,10 @@ describe('browser application agent against a real local application server', ()
       autoSubmit: true, status: 'queued', createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(), events: [], questions: [],
     };
-    const result = await application('/unsupported-multi', { run });
+    const waitForInput = vi.fn(async () => { throw new Error('Test ended after manual review prompt'); });
+    const result = await application('/unsupported-multi', { run, waitForInput });
+    expect(waitForInput).toHaveBeenCalledTimes(1);
+    expect(result.run.events.some(event => event.message.includes('Answered a'))).toBe(true);
     expect(result.run.status).toBe('failed');
     expect(result.run.compatibility?.status).toBe('needs_review');
     expect(result.run.compatibility?.issues.some(issue => /Specialized selection control/.test(issue))).toBe(true);

@@ -45,7 +45,7 @@ export function CampaignPanel({ request, onError, onSelect, ready }: Props) {
     </form>
     {current && <div className="campaign-progress" aria-live="polite">
       <div className="section-heading"><div><strong>{current.status.toUpperCase()} · Batch {current.rounds} / {current.preferences.maxSearchRounds}</strong><p>{current.message}</p></div>{active ? <button className="button button-outline button-small" disabled={busy} onClick={() => void mutate(`/campaigns/${current.id}/stop`)}>Pause campaign</button> : ['paused', 'failed'].includes(current.status) && <button className="button button-outline button-small" disabled={busy} onClick={() => void mutate(`/campaigns/${current.id}/resume`)}>Resume remaining jobs</button>}</div>
-      <div className="campaign-job-list">{current.jobs.map(job => <div className="campaign-job" key={job.url}><div><a href={job.url} target="_blank" rel="noreferrer">{job.title}</a><p>{job.company} · {job.location}</p><small>{job.reason}</small></div><div><span>{job.state}</span>{job.runId && <button className="text-button" onClick={() => onSelect(job.runId!)}>View application</button>}</div></div>)}</div>
+      <div className="campaign-job-list">{current.jobs.map(job => <div className="campaign-job" key={job.url}><div><a href={job.url} target="_blank" rel="noreferrer">{job.title}</a><p>{job.company} · {job.location}</p><small>{job.reason}</small>{job.outcome && <p className="field-help"><strong>{job.state === 'skipped' ? 'Skipped because: ' : 'Attempt result: '}</strong>{job.outcome}</p>}</div><div><span>{job.state}</span>{job.runId && <button className="text-button" onClick={() => onSelect(job.runId!)}>View application</button>}</div></div>)}</div>
     </div>}
   </section>;
 }

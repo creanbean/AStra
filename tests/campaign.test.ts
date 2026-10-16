@@ -59,3 +59,51 @@ it('removes tracking but preserves actual job identifiers and hash routes', () =
   expect(canonicalUrl('https://company.example/job?gh_jid=42&utm_source=foo#detail')).toBe('https://company.example/job?gh_jid=42');
   expect(canonicalUrl('https://company.example/#/jobs/42')).toContain('#/jobs/42');
 });
+
+it('retries a failed pre-submission attempt found in a later search batch', async () => {
+  const store = await setup();
+  const old = runFor(job('1').url);
+  old.status = 'failed';
+  old.events = [{ at: new Date().toISOString(), message: 'The browser stopped before the application form loaded.', kind: 'error' }];
+  store.runs.push(old);
+  const runner = new CampaignRunner(store, {
+    discover: async (_prefs, excluded) => {
+      expect(excluded).not.toContain(canonicalUrl(old.url));
+      return [job('1')];
+    },
+    apply: async candidate => {
+      const successful = runFor(candidate.url);
+      store.runs.push(successful);
+      return successful;
+    },
+  });
+  const campaign = await runner.start({ ...preferences, maxApplications: 1, maxSearchRounds: 1 });
+  await vi.waitFor(() => expect(runner.busy).toBe(false));
+  expect(campaign.jobs.map(candidate => candidate.state)).toEqual(['submitted']);
+  expect(store.runs).toHaveLength(2);
+});
+
+it('does not automatically retry a failed run once final submission may have been attempted', async () => {
+  const store = await setup();
+  const uncertain = runFor(job('1').url);
+  uncertain.status = 'failed';
+  uncertain.events = [{ at: new Date().toISOString(), message: 'Submitting the completed application to the employer.', kind: 'action' }];
+  uncertain.result = 'The employer did not confirm submission. Submission is uncertain.';
+  store.runs.push(uncertain);
+  const runner = new CampaignRunner(store, {
+    discover: async (_prefs, excluded) => {
+      expect(excluded).toContain(canonicalUrl(uncertain.url));
+      return [job('1'), job('2')];
+    },
+    apply: async candidate => {
+      const applied = runFor(candidate.url);
+      store.runs.push(applied);
+      return applied;
+    },
+  });
+  const campaign = await runner.start({ ...preferences, maxApplications: 1, maxSearchRounds: 1 });
+  await vi.waitFor(() => expect(runner.busy).toBe(false));
+  expect(campaign.jobs.map(candidate => candidate.url)).toEqual([canonicalUrl(job('2').url)]);
+  expect(campaign.jobs[0].state).toBe('submitted');
+});
+
