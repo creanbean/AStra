@@ -425,6 +425,7 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
     let previousState = '';
     let activeMs = 0;
     let manualCompatibilityAcknowledged = '';
+    let applicationEntryAttempts = 0;
     for (let step = 0; step < 80; step++) {
       const started = Date.now();
       throwIfCancelled(signal);
@@ -458,7 +459,12 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
       if (!hasApplicationIdentity) {
         const entry = await findAction(page, true);
         if (entry?.kind === 'apply') {
-          await log(`Opening the application form via "${entry.label}" before answering fields.`, 'action');
+          if (++applicationEntryAttempts > 3) {
+            await pause([{ key: '__manual', label: 'The Apply Now button did not open usable application fields after several attempts. Open the form in the AStra browser and click Continue.', type: 'manual', options: ['Continue'], required: true }], 'Apply Now was clicked but the application form did not appear. Manual navigation is needed.');
+            applicationEntryAttempts = 0;
+            continue;
+          }
+          await log(`Opening the application form via "${entry.label}" before answering fields (attempt ${applicationEntryAttempts}).`, 'action');
           await entry.locator.click();
           await page.waitForLoadState('domcontentloaded').catch(() => {});
           await page.waitForLoadState('networkidle', { timeout: 4_000 }).catch(() => {});
@@ -467,6 +473,7 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
           continue;
         }
       }
+      if (hasApplicationIdentity) applicationEntryAttempts = 0;
       const report = await assessCompatibility(page, fields, inspectionFailures);
       if (JSON.stringify(run.compatibility) !== JSON.stringify(report)) {
         run.compatibility = report;
