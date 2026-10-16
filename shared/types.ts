@@ -83,6 +83,8 @@ export interface JobCandidate {
   reason: string;
   state: 'queued' | 'running' | 'submitted' | 'failed' | 'skipped';
   runId?: string;
+  /** Last verified result from the browser attempt, not a job-fit rationale. */
+  outcome?: string;
 }
 export interface Campaign {
   id: string;
