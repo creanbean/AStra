@@ -335,6 +335,7 @@ async function findAction(page: Page, preferApply = false): Promise<{ locator: L
 async function validationErrors(page: Page): Promise<string[]> {
   const errors: string[] = [];
   for (const frame of page.frames()) {
+    if (!isApplicationFrame(frame)) continue;
     const found = await frame.evaluate(({ positive, negative }) => {
       const invalid = [...document.querySelectorAll<HTMLInputElement>('input, select, textarea')].filter((el) => el.getClientRects().length && !el.validity.valid);
       const described = [...document.querySelectorAll('[role="alert"], .field-error, .error-message, [data-error], [aria-invalid="true"]')].filter((el) => el.getClientRects().length).filter((el) => {
