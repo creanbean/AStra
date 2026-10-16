@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { BrowserAgentOptions, Question } from '../shared/types';
 import { challengePresent, checkJobFit, planNavigation } from './navigation.js';
 import { answerQuestion, matchOption, needsExplicitAnswer, normalize } from './answering';
-import { assessCompatibility } from './compatibility.js';
+import { assessCompatibility, isApplicationFrame } from './compatibility.js';
 
 type Field = Question & {
   selector: string;
@@ -57,7 +57,7 @@ async function discover(frame: Frame, prefix: string): Promise<Field[]> {
     const seen = new Set<HTMLElement>();
     const results: RawField[] = [];
     for (const el of all) {
-      if (seen.has(el) || !visible(el) || el.hasAttribute('disabled') || el.getAttribute('aria-disabled') === 'true' || el.hasAttribute('readonly')) continue;
+      if (seen.has(el) || !visible(el) || el.hasAttribute('disabled') || el.getAttribute('aria-disabled') === 'true' || (el.hasAttribute('readonly') && el.getAttribute('role') !== 'combobox' && el.getAttribute('aria-haspopup') !== 'listbox')) continue;
       if (el instanceof HTMLInputElement && ['hidden', 'submit', 'button', 'reset', 'image'].includes(el.type)) continue;
       if (el.closest('[role="combobox"]') && el.getAttribute('role') !== 'combobox') continue;
       const role = el.getAttribute('role');
@@ -316,7 +316,7 @@ async function freshConfirmation(page: Page, before: string[], beforeUrl: string
   return page.url() !== beforeUrl && !await page.locator('input:not([type="hidden"]), select, textarea, [role="combobox"]').count();
 }
 
-async function findAction(page: Page): Promise<{ locator: Locator; kind: 'next' | 'submit' | 'apply'; label: string } | undefined> {
+async function findAction(page: Page, preferApply = false): Promise<{ locator: Locator; kind: 'next' | 'submit' | 'apply'; label: string } | undefined> {
   const candidates: { locator: Locator; kind: 'next' | 'submit' | 'apply'; label: string; score: number }[] = [];
   for (const frame of page.frames()) {
     const controls = frame.locator('button, input[type="submit"], input[type="button"], a, [role="button"]');
@@ -329,7 +329,7 @@ async function findAction(page: Page): Promise<{ locator: Locator; kind: 'next' 
       else if (/^(apply(?: now| for (?:this )?(?:job|position))?|start application|begin application)$/i.test(label)) candidates.push({ locator, kind: 'apply', label, score: 1 });
     }
   }
-  return candidates.sort((a, b) => b.score - a.score)[0];
+  return candidates.sort((a, b) => (preferApply ? Number(b.kind === 'apply') - Number(a.kind === 'apply') : 0) || b.score - a.score)[0];
 }
 
 async function validationErrors(page: Page): Promise<string[]> {
@@ -438,6 +438,7 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
       const fields: Field[] = [];
       const inspectionFailures: string[] = [];
       for (const frame of page.frames()) {
+        if (!isApplicationFrame(frame)) continue;
         const discovered = await discover(frame, marker).catch(() => {
           inspectionFailures.push('Could not discover fields in one embedded application frame.');
           return [] as Field[];
@@ -449,20 +450,26 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
           fields.push(field);
         }
       }
+      // Job detail pages often contain navigation/filter inputs but no application.
+      // Open the actual application before auditing or answering incidental fields.
+      const hasApplicationIdentity = fields.some((field) => /\\b(first|given|last|family|full)\\s+name\\b|\\bresume\\b|r[eé]sum[eé]|\\bcover letter\\b/i.test(field.label))
+        || fields.length >= 3 && fields.some((field) => /\\b(email|phone)\\b/i.test(field.label));
+      if (!hasApplicationIdentity) {
+        const entry = await findAction(page, true);
+        if (entry?.kind === 'apply') {
+          await log(`Opening the application form via "${entry.label}" before answering fields.`, 'action');
+          await entry.locator.click();
+          await page.waitForLoadState('domcontentloaded').catch(() => {});
+          await page.waitForLoadState('networkidle', { timeout: 4_000 }).catch(() => {});
+          noProgress = 0;
+          previousState = '';
+          continue;
+        }
+      }
       const report = await assessCompatibility(page, fields, inspectionFailures);
       if (JSON.stringify(run.compatibility) !== JSON.stringify(report)) {
         run.compatibility = report;
         await log(`Form compatibility: ${report.platform}, ${report.status.replace('_', ' ')} (${report.detectedFields} controls detected).${report.issues.length ? ' ' + report.issues.join('; ') : ''}`, report.issues.length ? 'warning' : 'info');
-      }
-      if (report.status === 'needs_review' && report.issues.length) {
-        if (run.campaignId) throw new Error('This form has controls that require manual review. AStra skipped automatic submission. Check compatibility issues in application activity.');
-        const fingerprint = page.url() + JSON.stringify(report.issues);
-        if (manualCompatibilityAcknowledged !== fingerprint) {
-          await page.bringToFront();
-          await pause([{ key: '__compatibility', label: `AStra cannot verify these form widgets: ${report.issues.join('; ')}. Complete them in the open AStra browser without submitting, then continue.`, type: 'manual', options: ['Continue'], required: true }], 'Compatibility check requires a human to complete unsupported form controls. No application has been submitted.');
-          manualCompatibilityAcknowledged = fingerprint;
-          continue;
-        }
       }
       let filled = 0;
       const unresolved: Question[] = [];
@@ -549,6 +556,20 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
         }
         continue;
       }
+      if (report.status === 'needs_review' && report.issues.length) {
+        // Never discard the entire form before handling fields we *can* fill.
+        // A genuinely unsupported widget is still not safe to auto-submit.
+        await screenshot();
+        await log(`Automated fill attempted; unsupported widgets need review: ${report.issues.join('; ')}`, 'warning');
+        if (run.campaignId) throw new Error(`This application needs review after filling recognized fields: ${report.issues.join('; ')}`);
+        const fingerprint = page.url() + JSON.stringify(report.issues);
+        if (manualCompatibilityAcknowledged !== fingerprint) {
+          await page.bringToFront();
+          await pause([{ key: '__compatibility', label: `Complete these unsupported controls in the AStra browser without submitting: ${report.issues.join('; ')}`, type: 'manual', options: ['Continue'], required: true }], 'Recognized fields have been filled. Please complete the unsupported controls in the AStra browser.');
+          manualCompatibilityAcknowledged = fingerprint;
+          continue;
+        }
+      }
       // Fill application fields first. A real verification gate is only a
       // blocker when proceeding to the next step or submitting the form.
       // Passive reCAPTCHA badges never stop ordinary form completion.
@@ -569,12 +590,12 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
         await pause([{ key: '__manual', label: 'Open the application or complete the unusual control in the AStra browser without submitting. Then continue.', type: 'manual', options: ['Continue'], required: true }], 'No usable navigation control was found. Please move to the application form in the open browser.');
         continue;
       }
-      const isFinal = action.kind === 'submit' || action.kind === 'apply' && (fields.length > 0 || submittedAttempt);
+      const isFinal = action.kind === 'submit' || (action.kind === 'apply' && hasApplicationIdentity);
       if (isFinal) {
         // Conditional ATS questions can appear *after* a prior selection. Discover again
         // immediately before considering submission so we do not miss new required fields.
         const refreshed: Field[] = [];
-        for (const frame of page.frames()) refreshed.push(...await discover(frame, marker).catch(() => []));
+        for (const frame of page.frames()) if (isApplicationFrame(frame)) refreshed.push(...await discover(frame, marker).catch(() => []));
         if (refreshed.some((field) => field.required && !fields.some((prior) => prior.frame === field.frame && prior.selector === field.selector))) {
           await log('New required fields appeared after answering. Rechecking the application before submission.', 'info');
           continue;
