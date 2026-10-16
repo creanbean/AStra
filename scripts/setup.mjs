@@ -19,7 +19,7 @@ if (!existsSync('.env')) {
   console.log('Automatic discovery requires a paid OpenAI API key (separate from ChatGPT).');
   console.log('This terminal entry is visible. Keep the terminal private. The key is saved only in your ignored local .env.');
   const key = (await terminal.question('API key (or leave blank to configure .env later): ')).trim();
-  const model = (await terminal.question('Model [gpt-4.1-mini]: ')).trim() || 'gpt-4.1-mini';
+  const model = (await terminal.question('Model [gpt-6.1-sol]: ')).trim() || 'gpt-6.1-sol';
   terminal.close();
   if (/[\r\n]/.test(key + model)) throw new Error('Invalid configuration.');
   let env = readFileSync('.env.example', 'utf8').replace(/^AI_API_KEY=.*$/m, `AI_API_KEY=${JSON.stringify(key)}`).replace(/^AI_MODEL=.*$/m, `AI_MODEL=${JSON.stringify(model)}`);
