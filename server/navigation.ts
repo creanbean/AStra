@@ -36,20 +36,55 @@ export async function planNavigation(page: Page, signal: AbortSignal): Promise<{
   return { locator: candidate.locator, kind, label: candidate.label };
 }
 
+/**
+ * Detect a genuinely interactive human gate. A reCAPTCHA v3/invisible badge,
+ * sitekey or empty token is NOT a human task: these are often generated at
+ * submission time and can be present throughout a normal application.
+ *
+ * Never solve or bypass security challenges here; hand off visible challenges,
+ * sign-in and verification steps to the user.
+ */
 export async function challengePresent(page: Page): Promise<boolean> {
   for (const frame of page.frames()) {
-    if (/google\.com\/recaptcha|hcaptcha\.com|challenges\.cloudflare\.com/.test(frame.url())) continue;
-    if (await frame.locator('input[type="password"]:visible').count()) return true;
-    const body = await frame.locator('body').innerText({ timeout: 1500 }).catch(() => '');
-    if (/verify (?:that )?you(?: are|'re) human|complete the captcha|checking your browser|verify your email|enter (?:the )?(?:verification|security) code/i.test(body)) return true;
-    const widget = await frame.locator('iframe[src*="recaptcha"][src*="anchor"]:visible, iframe[src*="hcaptcha"]:visible, iframe[src*="challenges.cloudflare"]:visible, [data-sitekey]:visible').count();
-    if (widget) {
-      const solved = await frame.locator('[name="g-recaptcha-response"], [name="h-captcha-response"], [name="cf-turnstile-response"]').evaluateAll(els => els.some(el => (el as HTMLInputElement).value?.trim()));
-      if (!solved) {
-        const checked = await Promise.all(page.frames().filter(f => /google\.com\/recaptcha|hcaptcha\.com|challenges\.cloudflare\.com/.test(f.url())).map(f => f.locator('[aria-checked="true"]').count().catch(() => 0)));
-        if (!checked.some(Boolean)) return true;
+    const url = frame.url();
+    if (/google\.(?:com|[a-z.]+)\/recaptcha\/|recaptcha\.net\/recaptcha\/|hcaptcha\.com\/|challenges\.cloudflare\.com\//i.test(url)) continue;
+    const gated = await frame.evaluate(() => {
+      const visible = (element: Element): boolean => {
+        let node: HTMLElement | null = element as HTMLElement;
+        while (node) {
+          const style = getComputedStyle(node);
+          if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+          node = node.parentElement;
+        }
+        const rect = (element as HTMLElement).getBoundingClientRect();
+        return rect.width > 1 && rect.height > 1;
+      };
+      if ([...document.querySelectorAll<HTMLInputElement>('input[type="password"]')].some(visible)) return true;
+      if ([...document.querySelectorAll<HTMLInputElement>('input[autocomplete="one-time-code"]')].some(visible)) return true;
+
+      // Challenge wording only blocks progress when presented as a visible
+      // dialog or dedicated verification heading, not incidental page copy.
+      const gateCopy = /(?:verify (?:that )?you(?: are|'re) human|complete (?:the |a )?captcha|checking your browser|enter (?:the )?(?:verification|security) code|verify your email)/i;
+      const dialogs = [...document.querySelectorAll<HTMLElement>('[role="alertdialog"], [role="dialog"], h1, h2, h3')];
+      if (dialogs.some((element) => visible(element) && gateCopy.test((element.getAttribute('aria-label') || element.textContent || '').slice(0, 400)))) return true;
+
+      for (const iframe of document.querySelectorAll<HTMLIFrameElement>('iframe')) {
+        if (!visible(iframe)) continue;
+        const src = iframe.getAttribute('src') || '';
+        const rect = iframe.getBoundingClientRect();
+        const passiveBadge = !!iframe.closest('.grecaptcha-badge, [data-size="invisible"], [data-badge="bottomright"], [data-badge="bottomleft"]');
+        if (passiveBadge) continue;
+        // reCAPTCHA image challenge popup is separate from its anchor/badge.
+        if (/\/recaptcha\/(?:api2|enterprise)\/bframe/i.test(src) && rect.width >= 180 && rect.height >= 100) return true;
+        // Explicit interactive checkbox widgets; not background/invisible anchors.
+        if (/\/recaptcha\/(?:api2|enterprise)\/anchor/i.test(src) && rect.width >= 260 && rect.height >= 70) return true;
+        if (/hcaptcha\.com\//i.test(src) && rect.width >= 220 && rect.height >= 65) return true;
+        // Turnstile may also use non-interactive modes: only large visible prompts.
+        if (/challenges\.cloudflare\.com\//i.test(src) && rect.width >= 240 && rect.height >= 65) return true;
       }
-    }
+      return false;
+    }).catch(() => false);
+    if (gated) return true;
   }
   return false;
 }
