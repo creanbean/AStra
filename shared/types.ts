@@ -24,6 +24,14 @@ export interface Profile {
   answers: Record<string, string>;
   resume?: { path: string; name: string; text: string };
 }
+export interface CompatibilityReport {
+  platform: string;
+  status: 'checking' | 'compatible' | 'needs_review';
+  detectedFields: number;
+  issues: string[];
+  /** A positive result applies only to the currently rendered form step. */
+  scope: 'current_step';
+}
 export type RunStatus = 'queued' | 'running' | 'needs_input' | 'ready_to_submit' | 'submitted' | 'failed' | 'cancelled';
 export interface RunEvent { at: string; message: string; kind: 'info' | 'action' | 'warning' | 'error' }
 export interface Question { context?: string; key: string; label: string; type: string; options: string[]; required: boolean }
@@ -37,6 +45,7 @@ export interface ApplicationRun {
   events: RunEvent[];
   questions: Question[];
   screenshot?: boolean;
+  compatibility?: CompatibilityReport;
   campaignId?: string;
   searchPreferences?: SearchPreferences;
   result?: string;

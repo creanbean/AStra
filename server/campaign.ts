@@ -67,7 +67,7 @@ export class CampaignRunner {
       try {
         const run = await this.deps.apply(job, c, signal);
         job.runId = run.id;
-        job.state = run.status === 'submitted' ? 'submitted' : 'failed';
+        job.state = run.status === 'submitted' ? 'submitted' : run.compatibility?.status === 'needs_review' ? 'skipped' : 'failed';
       } catch (error) {
         job.state = 'failed';
         if (signal.aborted) throw error;

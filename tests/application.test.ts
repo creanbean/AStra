@@ -120,6 +120,149 @@ function fixture(): ExpressApp {
     res.redirect(303, '/complete');
   });
 
+  app.get('/button-dropdown', (_req, res) => res.send(document(`
+    <h1>Apply for Engineer</h1><form method="post" action="/button-dropdown">
+      ${identityFields}
+      <label id="button-authorization-label">Are you legally authorized to work in the United States?</label>
+      <button type="button" id="button-authorization" aria-haspopup="listbox" aria-labelledby="button-authorization-label" aria-controls="button-options" aria-expanded="false" aria-required="true">Choose an answer</button>
+      <div id="button-options" role="listbox" hidden><div role="option">Yes</div><div role="option">No</div></div>
+      <input type="hidden" name="authorized" id="button-value">
+      <button type="submit">Submit application</button>
+    </form><script>
+      const trigger=document.getElementById('button-authorization');
+      const list=document.getElementById('button-options');
+      trigger.addEventListener('click',()=>{list.hidden=!list.hidden;trigger.setAttribute('aria-expanded',String(!list.hidden));});
+      for(const option of list.children)option.addEventListener('click',()=>{
+        document.getElementById('button-value').value=option.textContent.toLowerCase();
+        trigger.textContent=option.textContent;list.hidden=true;trigger.setAttribute('aria-expanded','false');
+      });
+    </script>`)));
+  app.post('/button-dropdown', (req, res) => {
+    record('/button-dropdown', req.body);
+    if (req.body.authorized !== 'yes') return res.status(422).send(document('<p role="alert">Missing work authorization</p>'));
+    res.redirect(303, '/complete');
+  });
+
+  app.get('/searchable-dropdown', (_req, res) => res.send(document(`
+    <h1>Apply for Engineer</h1><form method="post" action="/searchable-dropdown">
+      ${identityFields}
+      <label id="search-label">Are you legally authorized to work in the United States?</label>
+      <div data-field><input role="combobox" id="search-trigger" aria-labelledby="search-label" aria-controls="search-options" aria-required="true" aria-expanded="false" autocomplete="off">
+        <input type="hidden" name="authorized" id="search-value">
+        <div id="search-options" role="listbox" hidden><div role="option" aria-selected="false">Yes</div><div role="option" aria-selected="false">No</div></div>
+      </div><button type="submit">Submit application</button>
+    </form><script>
+      const search=document.getElementById('search-trigger');
+      const choices=document.getElementById('search-options');
+      search.addEventListener('input',()=>{choices.hidden=!search.value;search.setAttribute('aria-expanded',String(!choices.hidden));});
+      for (const option of choices.children) option.addEventListener('click',()=>{
+        document.getElementById('search-value').value=option.textContent.toLowerCase();
+        for(const item of choices.children)item.setAttribute('aria-selected',String(item===option));
+        search.value='';choices.hidden=true;search.setAttribute('aria-expanded','false');
+      });
+    </script>`)));
+  app.post('/searchable-dropdown', (req, res) => {
+    record('/searchable-dropdown', req.body);
+    if (req.body.authorized !== 'yes') return res.status(422).send(document('<p role="alert">Missing work authorization</p>'));
+    res.redirect(303, '/complete');
+  });
+
+  app.get('/multi-select', (_req, res) => res.send(document(`
+    <h1>Engineer application</h1>
+    <form method="post" action="/multi-select">${identityFields}
+      <label>Technical skills
+        <select name="languages" multiple required>
+          <option value="ts">TypeScript</option><option value="react">React</option><option value="py">Python</option>
+        </select>
+      </label><button type="submit">Submit application</button>
+    </form>`)));
+  app.post('/multi-select', (req, res) => {
+    record('/multi-select', req.body);
+    const answers = Array.isArray(req.body.languages) ? req.body.languages : [req.body.languages];
+    if (!answers.includes('ts') || !answers.includes('react') || answers.includes('py')) return res.status(422).send(document('<p role="alert">Incorrect skills</p>'));
+    res.redirect(303, '/complete');
+  });
+
+  app.get('/unsupported-multi', (_req, res) => res.send(document(`
+    <h1>Engineer application</h1><form method="post" action="/unsupported-multi">${identityFields}
+      <div role="listbox" aria-multiselectable="true" aria-required="true" aria-label="Available work shifts">
+        <div role="option" aria-selected="false">Morning</div><div role="option" aria-selected="false">Evening</div>
+      </div>
+      <button type="submit">Submit application</button>
+    </form>`)));
+  app.post('/unsupported-multi', (req, res) => { record('/unsupported-multi', req.body); res.redirect(303, '/complete'); });
+
+  app.get('/conditional-fields', (_req, res) => res.send(document(`
+    <h1>Engineer application</h1><form method="post" action="/conditional-fields">${identityFields}
+      <label>Country <select name="country" id="country" required>
+        <option value="">Choose an answer</option><option value="United States">United States</option>
+      </select></label>
+      <div id="conditional"></div>
+      <button type="submit">Submit application</button></form>
+      <script>
+        document.getElementById('country').addEventListener('change', () => {
+          document.getElementById('conditional').innerHTML = '<label>City <input name="city" required></label>';
+        });
+      </script>`)));
+  app.post('/conditional-fields', (req, res) => {
+    record('/conditional-fields', req.body);
+    if (req.body.country !== 'United States' || req.body.city !== 'New York') return res.status(422).send(document('<p role="alert">Location missing</p>'));
+    res.redirect(303, '/complete');
+  });
+
+  app.get('/react-toggle', (_req, res) => res.send(document(`
+    <h1>Engineer application</h1><form method="post" action="/react-toggle">${identityFields}
+      <label id="react-label">Are you legally authorized to work in the United States?</label>
+      <div data-field>
+        <input role="combobox" id="react-select-input" aria-labelledby="react-label" aria-controls="portal-options" aria-required="true" aria-expanded="false" autocomplete="off">
+        <button type="button" id="flyout" aria-label="Toggle flyout">▼</button>
+        <input name="authorized" type="hidden" id="react-value">
+      </div>
+      <div id="portal-options" role="listbox" hidden><div role="option">Yes</div><div role="option">No</div></div>
+      <button type="submit">Submit application</button></form>
+      <script>
+        const flyout=document.getElementById('flyout');
+        const menu=document.getElementById('portal-options');
+        flyout.addEventListener('click',()=>{menu.hidden=false;document.getElementById('react-select-input').setAttribute('aria-expanded','true');});
+        for(const option of menu.children) option.addEventListener('click',()=>{
+          document.getElementById('react-value').value=option.textContent.toLowerCase();
+          document.getElementById('react-select-input').setAttribute('aria-expanded','false');
+          menu.hidden=true;
+        });
+      </script>`)));
+  app.post('/react-toggle', (req, res) => {
+    record('/react-toggle', req.body);
+    if (req.body.authorized !== 'yes') return res.status(422).send(document('<p role="alert">Missing authorization</p>'));
+    res.redirect(303, '/complete');
+  });
+
+
+  app.get('/select2-style', (_req, res) => res.send(document(`
+    <h1>Engineer application</h1><form method="post" action="/select2-style">${identityFields}
+      <label id="style-label">Are you legally authorized to work in the United States?</label>
+      <button id="style-trigger" type="button" role="combobox" aria-labelledby="style-label" aria-controls="style-options" aria-required="true" aria-expanded="false">Choose an answer</button>
+      <div id="style-options" class="select2-results" hidden>
+        <ul><li class="select2-results__option">Yes</li><li class="select2-results__option">No</li></ul>
+      </div>
+      <input type="hidden" name="authorized" id="style-value">
+      <button type="submit">Submit application</button></form>
+      <script>
+        const trigger=document.getElementById('style-trigger');
+        const options=document.getElementById('style-options');
+        trigger.addEventListener('click',()=>{options.hidden=false;trigger.setAttribute('aria-expanded','true');});
+        for(const choice of options.querySelectorAll('li')) choice.addEventListener('click',()=>{
+          document.getElementById('style-value').value=choice.textContent.toLowerCase();
+          trigger.textContent=choice.textContent;
+          trigger.setAttribute('aria-expanded','false');
+          options.hidden=true;
+        });
+      </script>`)));
+  app.post('/select2-style', (req, res) => {
+    record('/select2-style', req.body);
+    if (req.body.authorized !== 'yes') return res.status(422).send(document('<p role="alert">Missing selection</p>'));
+    res.redirect(303, '/complete');
+  });
+
   app.get('/review', (_req, res) => res.send(document(`
     <h1>Apply for Engineer</h1><form method="post" action="/review">${identityFields}<button type="submit">Submit application</button></form>`)));
   app.post('/review', (req, res) => { record('/review', req.body); res.redirect(303, '/complete'); });
@@ -331,6 +474,65 @@ describe('browser application agent against a real local application server', ()
     expect(run.status, JSON.stringify(run.events)).toBe('submitted');
     expect(submissions).toHaveLength(1);
     expect(submissions[0].fields).toMatchObject({ firstName: 'Alex', lastName: 'Rivera', email: 'alex.rivera@example.com', authorized: 'yes' });
+  });
+
+  it('handles a required button dropdown with aria-haspopup but no combobox role', async () => {
+    const { run } = await application('/button-dropdown');
+    expect(run.status, JSON.stringify(run.events)).toBe('submitted');
+    expect(submissions).toHaveLength(1);
+    expect(submissions[0].fields.authorized).toBe('yes');
+  });
+
+  it('fills searchable options and verifies a choice even when the search input clears', async () => {
+    const { run } = await application('/searchable-dropdown');
+    expect(run.status, JSON.stringify(run.events)).toBe('submitted');
+    expect(submissions).toHaveLength(1);
+    expect(submissions[0].fields.authorized).toBe('yes');
+  });
+
+  it('selects and verifies multiple native options from explicit saved applicant facts', async () => {
+    const candidate = structuredClone(profile);
+    candidate.answers['Technical skills'] = 'TypeScript; React';
+    const { run } = await application('/multi-select', { profile: candidate });
+    expect(run.status, JSON.stringify(run.events)).toBe('submitted');
+    expect(run.compatibility?.status).toBe('compatible');
+    expect(submissions).toHaveLength(1);
+    expect(submissions[0].fields.languages).toEqual(['ts', 'react']);
+  });
+
+  it('detects unsupported required widgets and never auto-submits campaign applications', async () => {
+    const run: ApplicationRun = {
+      id: crypto.randomUUID(), url: `${origin}/unsupported-multi`, campaignId: 'fixture-campaign',
+      autoSubmit: true, status: 'queued', createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(), events: [], questions: [],
+    };
+    const result = await application('/unsupported-multi', { run });
+    expect(result.run.status).toBe('failed');
+    expect(result.run.compatibility?.status).toBe('needs_review');
+    expect(result.run.compatibility?.issues.some(issue => /Specialized selection control/.test(issue))).toBe(true);
+    expect(submissions).toHaveLength(0);
+  });
+
+  it('detects conditionally injected required fields before submission', async () => {
+    const { run } = await application('/conditional-fields');
+    expect(run.status, JSON.stringify(run.events)).toBe('submitted');
+    expect(submissions).toHaveLength(1);
+    expect(submissions[0].fields.city).toBe('New York');
+  });
+
+  it('opens portal-rendered dropdowns through a sibling React-style toggle', async () => {
+    const { run } = await application('/react-toggle');
+    expect(run.status, JSON.stringify(run.events)).toBe('submitted');
+    expect(submissions).toHaveLength(1);
+    expect(submissions[0].fields.authorized).toBe('yes');
+  });
+
+
+  it('selects options in legacy Select2-style custom menus', async () => {
+    const { run } = await application('/select2-style');
+    expect(run.status, JSON.stringify(run.events)).toBe('submitted');
+    expect(submissions).toHaveLength(1);
+    expect(submissions[0].fields.authorized).toBe('yes');
   });
 
   it('waits for approval in review mode before posting the final application', async () => {

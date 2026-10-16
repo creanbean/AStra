@@ -4,7 +4,8 @@ import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { BrowserAgentOptions, Question } from '../shared/types';
 import { challengePresent, checkJobFit, planNavigation } from './navigation.js';
-import { answerQuestion, needsExplicitAnswer, normalize } from './answering';
+import { answerQuestion, matchOption, needsExplicitAnswer, normalize } from './answering';
+import { assessCompatibility } from './compatibility.js';
 
 type Field = Question & {
   selector: string;
@@ -25,7 +26,7 @@ async function discover(frame: Frame, prefix: string): Promise<Field[]> {
       for (const element of root.querySelectorAll('*')) if (element.shadowRoot) collect(element.shadowRoot);
     };
     collect(document);
-    const all = roots.flatMap((root) => [...root.querySelectorAll<HTMLElement>('input, textarea, select, [role="combobox"], [role="textbox"], [role="radio"], [role="checkbox"], [contenteditable="true"]')]);
+    const all = roots.flatMap((root) => [...root.querySelectorAll<HTMLElement>('input, textarea, select, [role="combobox"], [role="textbox"], [role="radio"], [role="checkbox"], [contenteditable="true"], button[aria-haspopup="listbox"], [role="button"][aria-haspopup="listbox"]')]);
     const visible = (el: HTMLElement) => {
       const style = getComputedStyle(el);
       return style.visibility !== 'hidden' && style.display !== 'none' && (el.getClientRects().length > 0 || (el instanceof HTMLInputElement && el.type === 'file'));
@@ -43,7 +44,10 @@ async function discover(frame: Frame, prefix: string): Promise<Field[]> {
       const ids = el.getAttribute('aria-labelledby')?.split(/\s+/).map((id) => idText(id, root)).filter(Boolean).join(' ');
       const labels = 'labels' in el ? [...((el as HTMLInputElement).labels ?? [])].map(labelText).join(' ') : '';
       const associated = el.id ? [...root.querySelectorAll('label')].find((label) => label.htmlFor === el.id) : undefined;
-      return (el.getAttribute('aria-label') || ids || labels || labelText(associated) || labelText(el.closest('label')) || el.getAttribute('placeholder') || el.getAttribute('name') || el.id || '').replace(/\s*\*\s*$/, '').trim();
+      const wrapper = el.closest('[data-field], [data-slot="form-item"], .application-question, .form-group, .field, .question');
+      const nearby = wrapper?.querySelector('label, [data-slot="form-label"], .field-label, .question-label');
+      const sibling = el.previousElementSibling?.matches('label, span') ? el.previousElementSibling : null;
+      return (el.getAttribute('aria-label') || ids || labels || labelText(associated) || labelText(el.closest('label')) || labelText(nearby) || labelText(sibling) || el.getAttribute('placeholder') || el.getAttribute('name') || el.id || '').replace(/\s*\*\s*$/, '').trim().slice(0, 300);
     };
     let counter = 0;
     const tag = (el: HTMLElement) => {
@@ -57,10 +61,10 @@ async function discover(frame: Frame, prefix: string): Promise<Field[]> {
       if (el instanceof HTMLInputElement && ['hidden', 'submit', 'button', 'reset', 'image'].includes(el.type)) continue;
       if (el.closest('[role="combobox"]') && el.getAttribute('role') !== 'combobox') continue;
       const role = el.getAttribute('role');
-      const kind = el instanceof HTMLSelectElement ? 'select' : role === 'combobox' ? 'combobox' : el instanceof HTMLInputElement ? el.type : role || (el.isContentEditable ? 'contenteditable' : 'textarea');
+      const kind = el instanceof HTMLSelectElement ? (el.multiple ? 'select-multiple' : 'select') : (role === 'combobox' || el.getAttribute('aria-haspopup') === 'listbox') ? 'combobox' : el instanceof HTMLInputElement ? el.type : role || (el.isContentEditable ? 'contenteditable' : 'textarea');
       let label = labelOf(el);
       const container = el.closest('fieldset, [role="radiogroup"], [role="group"]');
-      const required = el.hasAttribute('required') || el.getAttribute('aria-required') === 'true' || !!container?.querySelector('[required], [aria-required="true"]');
+      const required = el.hasAttribute('required') || el.getAttribute('aria-required') === 'true' || (kind === 'radio' && !!container?.querySelector('input[type="radio"][required], [role="radio"][aria-required="true"]')) || (container?.getAttribute('aria-required') === 'true');
       let options: string[] = [];
       let choices: RawField['choices'];
       let value = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement ? el.value : el.getAttribute('aria-valuetext') || el.textContent?.trim() || '';
@@ -79,7 +83,7 @@ async function discover(frame: Frame, prefix: string): Promise<Field[]> {
         choices = members.map((member) => ({ label: labelOf(member) || text(member), selector: tag(member), value: text(member) }));
         options = choices.map((choice) => choice.label);
         value = choices.find((choice) => members.find((member) => member.getAttribute('data-astra-control') === choice.selector.match(/"([^\"]+)"/)?.[1])?.getAttribute('aria-checked') === 'true')?.label || '';
-      } else if (kind === 'select') {
+      } else if (kind === 'select' || kind === 'select-multiple') {
         options = [...(el as HTMLSelectElement).options].filter((option) => !option.disabled && option.value !== '' && !/^(select|choose|please select|please choose)(\b|\.)/i.test(option.label)).map((option) => option.label.trim());
         choices = [...(el as HTMLSelectElement).options].map((option) => ({ label: option.label.trim(), value: option.value, selector: '' }));
       } else if (kind === 'checkbox') {
@@ -103,21 +107,80 @@ async function discover(frame: Frame, prefix: string): Promise<Field[]> {
   return raw.map((field) => ({ ...field, frame }));
 }
 
+/** Visible options in the open popup. Many ATS menus portal their choices outside the trigger. */
+const dropdownOptionSelector = '[role="option"], [role="menuitemradio"], .select2-results__option, .choices__item--choice, .ant-select-item-option, [data-automation-id="menuItem"], [role="listbox"] li, [role="listbox"] [data-value], [data-radix-select-viewport] [data-radix-collection-item]';
+
+async function visibleDropdownChoices(field: Field): Promise<{ label: string; locator: Locator }[]> {
+  const trigger = field.frame.locator(field.selector);
+  const controlled = await trigger.getAttribute('aria-controls') || await trigger.getAttribute('aria-owns');
+  const roots: Locator[] = [];
+  if (controlled) roots.push(field.frame.locator('[id="' + controlled.replace(/"/g, '\\"') + '"]'));
+  // Read open listbox/menu overlays first, even when framework portals have no
+  // aria-controls relationship. Only fall back to the body when nothing is exposed.
+  roots.push(field.frame.locator('[role="listbox"]:visible, .select2-results:visible, .choices__list--dropdown:visible, .ant-select-dropdown:visible, [data-automation-id="menuContainer"]:visible'));
+  roots.push(field.frame.locator('body'));
+  for (const root of roots) {
+    const options = root.locator(dropdownOptionSelector);
+    const found: { label: string; locator: Locator }[] = [];
+    for (let i = 0, count = Math.min(await options.count(), 120); i < count; i++) {
+      const option = options.nth(i);
+      if (!await option.isVisible().catch(() => false)) continue;
+      const label = ((await option.getAttribute('aria-label')) || await option.innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
+      if (label && !found.some((item) => normalize(item.label) === normalize(label))) found.push({ label, locator: option });
+    }
+    if (found.length) return found;
+  }
+  return [];
+}
+
 async function customOptions(field: Field): Promise<void> {
   const locator = field.frame.locator(field.selector);
-  await locator.click({ timeout: 5_000 });
-  // Prefer the control's own listbox; unrelated choices are not safe answers.
-  const controlled = await locator.getAttribute('aria-controls') || await locator.getAttribute('aria-owns');
-  let options: Locator;
-  if (controlled) options = field.frame.locator(`[id="${controlled.replace(/"/g, '\\"')}"]`).getByRole('option');
-  else options = field.frame.getByRole('option');
-  field.options = (await options.allTextContents()).map((s) => s.trim()).filter(Boolean);
-  await locator.press('Escape').catch(() => {});
+  let available = await visibleDropdownChoices(field);
+  if (!available.length) {
+    await locator.click({ timeout: 5_000 });
+    available = await visibleDropdownChoices(field);
+  }
+  if (!available.length) {
+    // React-select and some Greenhouse widgets open via a sibling chevron.
+    const parent = locator.locator('xpath=..');
+    const toggle = parent.locator('button[aria-label*="Toggle"], button[aria-label*="Open"], button[aria-label*="Show"], [aria-label="Toggle flyout"]');
+    if (await toggle.count()) {
+      await toggle.first().click({ timeout: 3_000 });
+      await field.frame.page().waitForTimeout(200);
+      available = await visibleDropdownChoices(field);
+    }
+  }
+  // Leave the popup open; some non-native menus do not implement Escape,
+  // and clicking their trigger a second time closes it instead of selecting.
+  field.options = available.map((option) => option.label);
+}
+
+/** Multiple answers are permitted only when grounded in saved applicant facts. */
+function multipleAnswers(field: Field, profile: BrowserAgentOptions['profile']): string[] {
+  const direct = profile.answers[field.key] ?? profile.answers[field.label] ??
+    Object.entries(profile.answers).find(([key]) => normalize(key) === normalize(field.label))?.[1];
+  const isSkills = /\b(skill|technical|programming language|technology|framework|tool)s?\b/i.test(field.label);
+  const raw = direct || (isSkills ? profile.skills : '');
+  if (!raw?.trim()) return [];
+  let inputs: string[];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    inputs = Array.isArray(parsed) && parsed.every((item) => typeof item === 'string') ? parsed as string[] : [raw];
+  } catch { inputs = [raw]; }
+  if (inputs.length === 1 && !matchOption(inputs[0], field.options)) inputs = inputs[0].split(/[;,\n]/);
+  const matched = inputs.map((input) => matchOption(input.trim(), field.options));
+  if (direct && matched.some((item) => !item)) return [];
+  return [...new Set(matched.filter((item): item is string => !!item))];
 }
 
 async function fillField(field: Field, answer: string): Promise<void> {
   const locator = field.frame.locator(field.selector);
-  if (field.kind === 'select') {
+  if (field.kind === 'select-multiple') {
+    const labels = answer.split(';').map((value) => value.trim()).filter(Boolean);
+    const values = labels.map((label) => field.choices?.find((choice) => choice.label === label)?.value);
+    if (!labels.length || values.some((value) => value === undefined)) throw new Error('Multiple choice answers do not match offered options.');
+    await locator.selectOption(values as string[]);
+  } else if (field.kind === 'select') {
     const choice = field.choices?.find((candidate) => candidate.label === answer);
     if (!choice) throw new Error('The requested select choice is no longer available.');
     await locator.selectOption({ value: choice.value });
@@ -133,19 +196,29 @@ async function fillField(field: Field, answer: string): Promise<void> {
       if ((await locator.getAttribute('aria-checked') === 'true') !== checked) await locator.click();
     } else await locator.setChecked(checked);
   } else if (field.kind === 'combobox') {
-    await locator.click();
-    const controlled = await locator.getAttribute('aria-controls') || await locator.getAttribute('aria-owns');
-    const root = controlled ? field.frame.locator(`[id="${controlled.replace(/"/g, '\\"')}"]`) : field.frame;
-    const option = root.getByRole('option', { name: answer, exact: true });
-    if (await option.count()) await option.first().click();
-    else {
-      const tag = await locator.evaluate((el) => el.tagName.toLowerCase());
-      if (tag !== 'input') throw new Error('The custom dropdown did not expose this option.');
-      await locator.fill(answer);
-      const candidate = field.frame.getByRole('option', { name: answer, exact: true });
-      await candidate.first().waitFor({ state: 'visible', timeout: 5_000 });
-      await candidate.first().click();
+    let choices = await visibleDropdownChoices(field);
+    if (!choices.length) {
+      await customOptions(field);
+      choices = await visibleDropdownChoices(field);
     }
+    let matching = choices.filter((candidate) => normalize(candidate.label) === normalize(answer));
+    if (matching.length !== 1 && await locator.evaluate((element) => element.tagName.toLowerCase()) === 'input') {
+      // Searchable combos expose choices only after typing the proposed answer.
+      await locator.fill(answer);
+      await field.frame.page().waitForTimeout(200);
+      choices = await visibleDropdownChoices(field);
+      matching = choices.filter((candidate) => normalize(candidate.label) === normalize(answer));
+    }
+    if (matching.length !== 1) {
+      // Async portals can populate after a network request. Do not use positional guesses.
+      for (let retry = 0; retry < 5 && matching.length !== 1; retry++) {
+        await field.frame.page().waitForTimeout(250);
+        choices = await visibleDropdownChoices(field);
+        matching = choices.filter((candidate) => normalize(candidate.label) === normalize(answer));
+      }
+    }
+    if (matching.length !== 1) throw new Error('The custom dropdown did not expose one unambiguous matching option.');
+    await matching[0].locator.click();
   } else {
     await locator.fill(answer);
     await locator.press('Tab').catch(() => {});
@@ -157,6 +230,13 @@ async function hasRenderedAnswer(field: Field, answer: string): Promise<boolean>
   try {
     const locator = field.frame.locator(field.selector);
     if (field.kind === 'file') return locator.evaluate(el => !!(el as HTMLInputElement).files?.length);
+    if (field.kind === 'select-multiple') {
+      const labels = answer.split(';').map((value) => value.trim()).filter(Boolean);
+      const values = labels.map((label) => field.choices?.find((choice) => choice.label === label)?.value);
+      if (!values.length || values.some((value) => value === undefined)) return false;
+      const selected = await locator.evaluate((el) => [...(el as HTMLSelectElement).selectedOptions].map((option) => option.value));
+      return selected.length === values.length && values.every((value) => selected.includes(value!));
+    }
     if (field.kind === 'select') {
       const choice = field.choices?.find(c => c.label === answer);
       return !!choice && await locator.inputValue() === choice.value;
@@ -172,6 +252,19 @@ async function hasRenderedAnswer(field: Field, answer: string): Promise<boolean>
       const actual = await locator.getAttribute('role') === 'checkbox'
         ? await locator.getAttribute('aria-checked') === 'true' : await locator.isChecked();
       return actual === expected;
+    }
+    if (field.kind === 'combobox') {
+      const values = await locator.evaluate((el) => {
+        const scope = el.closest('fieldset, [data-field], [data-slot="form-item"], [role="group"]') || el.parentElement;
+        const controlled = el.getAttribute('aria-controls') || el.getAttribute('aria-owns');
+        const listbox = controlled ? el.ownerDocument.getElementById(controlled) : null;
+        const selected = [...(listbox?.querySelectorAll<HTMLElement>('[aria-selected="true"], [data-state="checked"], [data-selected="true"]') || [])]
+          .map((item) => item.getAttribute('aria-label') || item.textContent || '');
+        const hidden = [...(scope?.querySelectorAll<HTMLInputElement>('input[type="hidden"]') || [])].map((item) => item.value);
+        const direct = el instanceof HTMLInputElement ? el.value : el.getAttribute('aria-valuetext') || el.textContent || '';
+        return [direct, ...selected, ...hidden];
+      });
+      return values.some((value) => normalize(value) === normalize(answer));
     }
     const actual = await locator.evaluate(el => el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
       ? el.value : el.getAttribute('aria-valuetext') || el.textContent || '');
@@ -330,6 +423,7 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
     let noProgress = 0;
     let previousState = '';
     let activeMs = 0;
+    let manualCompatibilityAcknowledged = '';
     for (let step = 0; step < 80; step++) {
       const started = Date.now();
       throwIfCancelled(signal);
@@ -347,13 +441,32 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
         await log('Verified that the live listing matches your role, level and location.');
       }
       const fields: Field[] = [];
+      const inspectionFailures: string[] = [];
       for (const frame of page.frames()) {
-        const discovered = await discover(frame, marker).catch(() => []);
+        const discovered = await discover(frame, marker).catch(() => {
+          inspectionFailures.push('Could not discover fields in one embedded application frame.');
+          return [] as Field[];
+        });
         // Keys remain stable across navigation but do not collide between frames.
         for (const field of discovered) {
           const duplicate = fields.some((existing) => existing.key === field.key);
           if (duplicate) field.key = `${field.key}:frame-${fields.length}`;
           fields.push(field);
+        }
+      }
+      const report = await assessCompatibility(page, fields, inspectionFailures);
+      if (JSON.stringify(run.compatibility) !== JSON.stringify(report)) {
+        run.compatibility = report;
+        await log(`Form compatibility: ${report.platform}, ${report.status.replace('_', ' ')} (${report.detectedFields} controls detected).${report.issues.length ? ' ' + report.issues.join('; ') : ''}`, report.issues.length ? 'warning' : 'info');
+      }
+      if (report.status === 'needs_review' && report.issues.length) {
+        if (run.campaignId) throw new Error('This form has controls that require manual review. AStra skipped automatic submission. Check compatibility issues in application activity.');
+        const fingerprint = page.url() + JSON.stringify(report.issues);
+        if (manualCompatibilityAcknowledged !== fingerprint) {
+          await page.bringToFront();
+          await pause([{ key: '__compatibility', label: `AStra cannot verify these form widgets: ${report.issues.join('; ')}. Complete them in the open AStra browser without submitting, then continue.`, type: 'manual', options: ['Continue'], required: true }], 'Compatibility check requires a human to complete unsupported form controls. No application has been submitted.');
+          manualCompatibilityAcknowledged = fingerprint;
+          continue;
         }
       }
       let filled = 0;
@@ -383,6 +496,21 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
           continue;
         }
         if (field.kind === 'password') continue;
+        if (field.kind === 'select-multiple') {
+          const answers = multipleAnswers(field, profile);
+          if (answers.length) {
+            const selection = answers.join('; ');
+            await fillField(field, selection);
+            if (!await hasRenderedAnswer(field, selection)) throw new Error('Multiple selection was not retained.');
+            completed.set(field.selector, selection);
+            filled++;
+            await log('Selected multiple choices grounded in your saved profile.', 'action');
+          } else if (field.required) {
+            if (run.campaignId) throw new Error('A required multi-select needs a saved, factual answer. No application was submitted.');
+            unresolved.push({ key: field.key, label: `${field.label} — enter one or more offered choices separated by semicolons.`, type: 'select-multiple', options: field.options, required: true });
+          } else ignored.add(field.key);
+          continue;
+        }
         if (field.kind === 'combobox' && !field.options.length) await customOptions(field).catch(() => {});
         const answer = await answerQuestion(field, profile, signal);
         // Do not silently skip optional fields when the configured AI provider failed.
@@ -440,6 +568,14 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
       }
       const isFinal = action.kind === 'submit' || action.kind === 'apply' && (fields.length > 0 || submittedAttempt);
       if (isFinal) {
+        // Conditional ATS questions can appear *after* a prior selection. Discover again
+        // immediately before considering submission so we do not miss new required fields.
+        const refreshed: Field[] = [];
+        for (const frame of page.frames()) refreshed.push(...await discover(frame, marker).catch(() => []));
+        if (refreshed.some((field) => field.required && !fields.some((prior) => prior.frame === field.frame && prior.selector === field.selector))) {
+          await log('New required fields appeared after answering. Rechecking the application before submission.', 'info');
+          continue;
+        }
         const errors = await validationErrors(page);
         if (errors.length) {
           // Ask for a corrected answer rather than repeatedly clicking an invalid form.
@@ -450,12 +586,12 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
           continue;
         }
         if (submittedAttempt) throw new Error('The final action was already clicked. Submission is uncertain; check the employer website before retrying.');
-        if (!run.autoSubmit) {
+        if (!run.autoSubmit || run.compatibility?.status === 'needs_review') {
           run.status = 'ready_to_submit';
           const waiting = waitForSubmit();
           void waiting.catch(() => {});
           await screenshot();
-          await log('The application is complete and ready for your submission approval.');
+          await log(run.compatibility?.status === 'needs_review' ? 'Manual compatibility review required before submission. Confirm all unsupported controls in the employer browser.' : 'The application is complete and ready for your submission approval.');
           await waiting;
           throwIfCancelled(signal);
           run.status = 'running';
