@@ -16,7 +16,7 @@ Or, from Terminal:
 npm run setup
 ```
 
-The launcher saves configuration to your local, Git-ignored `.env`. To change the API key/model later, edit that file and restart. Subsequent launches reuse it. If port 3000 is occupied, set `PORT` in `.env` and open that port instead. On Linux, install browser dependencies using `npx playwright install --with-deps chromium` if needed.
+The launcher saves configuration to your local, Git-ignored `.env`. **Existing installations:** edit `AI_MODEL=gpt-6.1-sol` in `.env` and restart; downloading updated code does not overwrite the model saved during your first setup. To change the API key/model later, edit that file and restart. Subsequent launches reuse it. If port 3000 is occupied, set `PORT` in `.env` and open that port instead. On Linux, install browser dependencies using `npx playwright install --with-deps chromium` if needed.
 
 ## Use it
 
@@ -42,13 +42,13 @@ A direct URL application tool remains available below the campaign panel.
 
 ## Configuration
 
-Default AI model is `gpt-4.1-mini`; set `AI_MODEL` to a model available in your API account. `AI_BASE_URL` defaults to `https://api.openai.com/v1`. Automatic discovery requires **Responses API + web_search + JSON output**; field answering also uses **Chat Completions JSON output**. A provider that merely exposes chat completions cannot run discovery.
+Default AI model is `gpt-6.1-sol`; set `AI_MODEL` to a model available in your API account. `AI_BASE_URL` defaults to `https://api.openai.com/v1`. Automatic discovery and form answering use the **Responses API**; discovery also requires **web_search + JSON output**. A provider that merely exposes chat completions cannot run AStra's AI workflows. The Sol model's default reasoning effort in AStra is medium.
 
 Official API references: [web search](https://developers.openai.com/api/docs/guides/tools-web-search), [structured output](https://developers.openai.com/api/docs/guides/structured-outputs).
 
 ```dotenv
 AI_API_KEY=your-key-here
-AI_MODEL=gpt-4.1-mini
+AI_MODEL=gpt-6.1-sol
 AI_BASE_URL=https://api.openai.com/v1
 ASTRA_HEADLESS=false
 PORT=3000
