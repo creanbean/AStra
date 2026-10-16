@@ -25,7 +25,7 @@ async function discover(frame: Frame, prefix: string): Promise<Field[]> {
       for (const element of root.querySelectorAll('*')) if (element.shadowRoot) collect(element.shadowRoot);
     };
     collect(document);
-    const all = roots.flatMap((root) => [...root.querySelectorAll<HTMLElement>('input, textarea, select, [role="combobox"], [role="textbox"], [role="radio"], [role="checkbox"], [contenteditable="true"]')]);
+    const all = roots.flatMap((root) => [...root.querySelectorAll<HTMLElement>('input, textarea, select, [role="combobox"], [role="textbox"], [role="radio"], [role="checkbox"], [contenteditable="true"], button[aria-haspopup="listbox"], [role="button"][aria-haspopup="listbox"]')]);
     const visible = (el: HTMLElement) => {
       const style = getComputedStyle(el);
       return style.visibility !== 'hidden' && style.display !== 'none' && (el.getClientRects().length > 0 || (el instanceof HTMLInputElement && el.type === 'file'));
@@ -57,7 +57,7 @@ async function discover(frame: Frame, prefix: string): Promise<Field[]> {
       if (el instanceof HTMLInputElement && ['hidden', 'submit', 'button', 'reset', 'image'].includes(el.type)) continue;
       if (el.closest('[role="combobox"]') && el.getAttribute('role') !== 'combobox') continue;
       const role = el.getAttribute('role');
-      const kind = el instanceof HTMLSelectElement ? 'select' : role === 'combobox' ? 'combobox' : el instanceof HTMLInputElement ? el.type : role || (el.isContentEditable ? 'contenteditable' : 'textarea');
+      const kind = el instanceof HTMLSelectElement ? 'select' : (role === 'combobox' || el.getAttribute('aria-haspopup') === 'listbox') ? 'combobox' : el instanceof HTMLInputElement ? el.type : role || (el.isContentEditable ? 'contenteditable' : 'textarea');
       let label = labelOf(el);
       const container = el.closest('fieldset, [role="radiogroup"], [role="group"]');
       const required = el.hasAttribute('required') || el.getAttribute('aria-required') === 'true' || !!container?.querySelector('[required], [aria-required="true"]');
@@ -103,16 +103,39 @@ async function discover(frame: Frame, prefix: string): Promise<Field[]> {
   return raw.map((field) => ({ ...field, frame }));
 }
 
+/** Visible options in the open popup. Many ATS menus portal their choices outside the trigger. */
+const dropdownOptionSelector = '[role="option"], [role="menuitemradio"], [role="listbox"] li, [role="listbox"] [data-value], [data-radix-select-viewport] [data-radix-collection-item]';
+
+async function visibleDropdownChoices(field: Field): Promise<{ label: string; locator: Locator }[]> {
+  const trigger = field.frame.locator(field.selector);
+  const controlled = await trigger.getAttribute('aria-controls') || await trigger.getAttribute('aria-owns');
+  const roots: Locator[] = [];
+  if (controlled) roots.push(field.frame.locator('[id="' + controlled.replace(/"/g, '\\"') + '"]'));
+  roots.push(field.frame.locator('body'));
+  for (const root of roots) {
+    const options = root.locator(dropdownOptionSelector);
+    const found: { label: string; locator: Locator }[] = [];
+    for (let i = 0, count = Math.min(await options.count(), 120); i < count; i++) {
+      const option = options.nth(i);
+      if (!await option.isVisible().catch(() => false)) continue;
+      const label = ((await option.getAttribute('aria-label')) || await option.innerText().catch(() => '')).replace(/\\s+/g, ' ').trim();
+      if (label && !found.some((item) => normalize(item.label) === normalize(label))) found.push({ label, locator: option });
+    }
+    if (found.length) return found;
+  }
+  return [];
+}
+
 async function customOptions(field: Field): Promise<void> {
   const locator = field.frame.locator(field.selector);
-  await locator.click({ timeout: 5_000 });
-  // Prefer the control's own listbox; unrelated choices are not safe answers.
-  const controlled = await locator.getAttribute('aria-controls') || await locator.getAttribute('aria-owns');
-  let options: Locator;
-  if (controlled) options = field.frame.locator(`[id="${controlled.replace(/"/g, '\\"')}"]`).getByRole('option');
-  else options = field.frame.getByRole('option');
-  field.options = (await options.allTextContents()).map((s) => s.trim()).filter(Boolean);
-  await locator.press('Escape').catch(() => {});
+  let available = await visibleDropdownChoices(field);
+  if (!available.length) {
+    await locator.click({ timeout: 5_000 });
+    available = await visibleDropdownChoices(field);
+  }
+  // Leave the popup open; some non-native menus do not implement Escape,
+  // and clicking their trigger a second time closes it instead of selecting.
+  field.options = available.map((option) => option.label);
 }
 
 async function fillField(field: Field, answer: string): Promise<void> {
@@ -133,19 +156,21 @@ async function fillField(field: Field, answer: string): Promise<void> {
       if ((await locator.getAttribute('aria-checked') === 'true') !== checked) await locator.click();
     } else await locator.setChecked(checked);
   } else if (field.kind === 'combobox') {
-    await locator.click();
-    const controlled = await locator.getAttribute('aria-controls') || await locator.getAttribute('aria-owns');
-    const root = controlled ? field.frame.locator(`[id="${controlled.replace(/"/g, '\\"')}"]`) : field.frame;
-    const option = root.getByRole('option', { name: answer, exact: true });
-    if (await option.count()) await option.first().click();
-    else {
-      const tag = await locator.evaluate((el) => el.tagName.toLowerCase());
-      if (tag !== 'input') throw new Error('The custom dropdown did not expose this option.');
-      await locator.fill(answer);
-      const candidate = field.frame.getByRole('option', { name: answer, exact: true });
-      await candidate.first().waitFor({ state: 'visible', timeout: 5_000 });
-      await candidate.first().click();
+    let choices = await visibleDropdownChoices(field);
+    if (!choices.length) {
+      await locator.click();
+      choices = await visibleDropdownChoices(field);
     }
+    let matching = choices.filter((candidate) => normalize(candidate.label) === normalize(answer));
+    if (matching.length !== 1 && await locator.evaluate((element) => element.tagName.toLowerCase()) === 'input') {
+      // Searchable combos expose choices only after typing the proposed answer.
+      await locator.fill(answer);
+      await field.frame.page().waitForTimeout(200);
+      choices = await visibleDropdownChoices(field);
+      matching = choices.filter((candidate) => normalize(candidate.label) === normalize(answer));
+    }
+    if (matching.length !== 1) throw new Error('The custom dropdown did not expose one unambiguous matching option.');
+    await matching[0].locator.click();
   } else {
     await locator.fill(answer);
     await locator.press('Tab').catch(() => {});
@@ -172,6 +197,19 @@ async function hasRenderedAnswer(field: Field, answer: string): Promise<boolean>
       const actual = await locator.getAttribute('role') === 'checkbox'
         ? await locator.getAttribute('aria-checked') === 'true' : await locator.isChecked();
       return actual === expected;
+    }
+    if (field.kind === 'combobox') {
+      const values = await locator.evaluate((el) => {
+        const scope = el.closest('fieldset, [data-field], [data-slot="form-item"], [role="group"]') || el.parentElement;
+        const controlled = el.getAttribute('aria-controls') || el.getAttribute('aria-owns');
+        const listbox = controlled ? el.ownerDocument.getElementById(controlled) : null;
+        const selected = [...(listbox?.querySelectorAll<HTMLElement>('[aria-selected="true"], [data-state="checked"], [data-selected="true"]') || [])]
+          .map((item) => item.getAttribute('aria-label') || item.textContent || '');
+        const hidden = [...(scope?.querySelectorAll<HTMLInputElement>('input[type="hidden"]') || [])].map((item) => item.value);
+        const direct = el instanceof HTMLInputElement ? el.value : el.getAttribute('aria-valuetext') || el.textContent || '';
+        return [direct, ...selected, ...hidden];
+      });
+      return values.some((value) => normalize(value) === normalize(answer));
     }
     const actual = await locator.evaluate(el => el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
       ? el.value : el.getAttribute('aria-valuetext') || el.textContent || '');
