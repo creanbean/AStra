@@ -40,6 +40,18 @@ A direct URL application tool remains available below the campaign panel.
 - **Human handoff:** Visible browser stays open while you solve verification or log in. AStra never solves/bypasses CAPTCHA. Ordinary missing answers are supplied in the dashboard and stay scoped to that application unless explicitly saved to your profile.
 - **Submission tracking:** Counts success only after fresh confirmation from the employer page. No automatic repeat of an uncertain final click. Canonical URL deduplication persists across runs; different aliases for the same job may still escape deduplication.
 
+## Application form compatibility (current page only)
+
+AStra identifies common applicant-tracking hosts (Greenhouse, Lever, Ashby, Workday, SmartRecruiters, iCIMS, Taleo, SuccessFactors, Jobvite, BambooHR, Recruitee, and Workable), **but recognition of a host is not certification that its form is supported**. Compatibility is re-assessed against the DOM and accessible controls after each navigation step:
+
+- **Recognized controls:** native text, email, telephone, number, date and file inputs; textarea; select (single and multiple); radio groups; checkboxes; ARIA comboboxes and listbox menus; React-style sibling toggles; visible portal options; ordinary dynamic input fields; open shadow roots and iframes. Native multi-select answers come only from explicit saved answers or matched profile skills, never invented data.
+- **Needs review:** visible required elements the agent cannot identify, custom multi-select listboxes, uncommon rich controls or inaccessible frames. The dashboard explains the reason and displays the current ATS family. In a job-search campaign AStra **skips** such an application rather than trying to submit it. For a direct link, it asks you to complete the widget in the actual AStra browser and requires an additional submission confirmation.
+- **Checking:** no application controls are visible yet, e.g. on a job description landing page. The agent discovers the form after navigation and evaluates the next step.
+
+Compatibility reports are for the **current rendered step**, not a promise about all steps, account login, bot verification, employer-side server validation, or whether the employer accepted the application. Before submission AStra re-scans the form for conditional required fields. It never bypasses CAPTCHA, creates fictitious qualifications, or submits on a flagged unsupported form without a manual review.
+
+For implementation choices, see the [W3C combobox pattern](https://www.w3.org/WAI/ARIA/apg/patterns/combobox/), [Playwright select options](https://playwright.dev/docs/input), [Lever application form fields](https://hire.lever.co/developer/documentation), [Ashby application form fields](https://docs.ashbyhq.com/application-forms), and [SmartRecruiters screening field types](https://developers.smartrecruiters.com/docs/get-application-screening-questions-and-privacy-policies).
+
 ## Configuration
 
 Default AI model is `gpt-6.1-sol`; set `AI_MODEL` to a model available in your API account. `AI_BASE_URL` defaults to `https://api.openai.com/v1`. Automatic discovery and form answering use the **Responses API**; discovery also requires **web_search + JSON output**. A provider that merely exposes chat completions cannot run AStra's AI workflows. The Sol model's default reasoning effort in AStra is medium.
