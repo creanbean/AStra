@@ -4,12 +4,18 @@ export async function responses(instructions: string, input: unknown, signal: Ab
   const base = (process.env.AI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
   const url = new URL(`${base}/responses`);
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))) throw new Error('AI endpoint must use HTTPS.');
+  // JSON mode validates the input message for the word "json", not just the
+  // top-level instructions. Keep application data at its original JSON paths.
+  const inputDocument = search ? input : {
+    ...(input !== null && typeof input === 'object' && !Array.isArray(input) ? input : { value: input }),
+    _astra_output_format: 'json',
+  };
   const response = await fetch(url, {
     method: 'POST', redirect: 'error', signal: AbortSignal.any([signal, AbortSignal.timeout(120_000)]),
     headers: { Authorization: `Bearer ${process.env.AI_API_KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ model: process.env.AI_MODEL || 'gpt-4.1-mini', store: false,
       instructions: search ? instructions : `${instructions} Return a valid JSON object.`,
-      input: JSON.stringify(input), max_output_tokens: 5000,
+      input: JSON.stringify(inputDocument), max_output_tokens: 5000,
       ...(search ? { tools: [{ type: 'web_search' }], tool_choice: 'required', include: ['web_search_call.action.sources'] } : { text: { format: { type: 'json_object' } } }),
     }),
   });
