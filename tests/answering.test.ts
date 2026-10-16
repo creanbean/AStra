@@ -4,6 +4,7 @@ import { emptyProfile, type Profile, type Question } from '../shared/types';
 
 const profile: Profile = { ...emptyProfile, firstName: 'Alex', lastName: 'Rivera', email: 'alex@example.com', country: 'United States', yearsExperience: '4', workAuthorization: 'Yes', requiresSponsorship: 'No', answers: {} };
 const question = (label: string, options: string[] = []): Question => ({ label, key: label, type: options.length ? 'select' : 'text', options, required: true });
+const aiResponse = (answer: string | null, evidence: string | null) => new Response(JSON.stringify({ status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify({ answer, evidence }) }] }] }));
 
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
@@ -50,29 +51,31 @@ describe('truthful applicant answers', () => {
 
   it('rejects AI output that has no verbatim supporting evidence', async () => {
     vi.stubEnv('AI_API_KEY', 'test-key');
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ answer: 'Ten years', evidence: 'Invented ten years of experience' }) } }] }), { status: 200 }));
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(aiResponse('Ten years', 'Invented ten years of experience'));
     expect((await answerQuestion(question('How many years of aerospace leadership experience do you have?'), profile)).value).toBeUndefined();
   });
 
   it('accepts a supported offered AI choice grounded in supplied resume text', async () => {
     vi.stubEnv('AI_API_KEY', 'test-key');
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ answer: 'TypeScript', evidence: 'TypeScript engineer' }) } }] }), { status: 200 }));
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(aiResponse('TypeScript', 'TypeScript engineer'));
     const grounded = { ...profile, resume: { path: '/tmp/private.pdf', name: 'resume.pdf', text: 'Alex is a TypeScript engineer.' } };
     const result = await answerQuestion(question('What is your primary programming language?', ['TypeScript', 'Python']), grounded);
     expect(result).toEqual({ value: 'TypeScript', source: 'ai' });
     const request = JSON.parse(fetchSpy.mock.calls[0][1]!.body as string);
-    expect(request.messages[1].content).not.toContain('/tmp/private.pdf');
+    expect(request.input).not.toContain('/tmp/private.pdf');
+    expect(request.model).toBe('gpt-6.1-sol');
+    expect(request.reasoning.effort).toBe('medium');
   });
 
   it('serializes real browser fields without cyclic Playwright runtime objects', async () => {
     vi.stubEnv('AI_API_KEY', 'test-key');
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ answer: 'C++', evidence: 'C++ firmware' }) } }] })));
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(aiResponse('C++', 'C++ firmware'));
     const frame: Record<string, unknown> = {}; frame.parent = frame;
     const field = { ...question('Which language have you used?', ['C++', 'Java']), frame, selector: '#private-runtime', context: 'Engineering skills' };
     const result = await answerQuestion(field, { ...profile, skills: 'C++ firmware' });
     expect(result).toEqual({ value: 'C++', source: 'ai' });
     const request = JSON.parse(String(fetchSpy.mock.calls[0][1]?.body));
-    const sent = JSON.parse(request.messages[1].content);
+    const sent = JSON.parse(request.input);
     expect(sent.question.context).toBe('Engineering skills');
     expect(sent.question.frame).toBeUndefined();
     expect(sent.question.selector).toBeUndefined();
