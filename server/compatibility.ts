@@ -53,14 +53,14 @@ async function findUnsupported(frame: Frame): Promise<string[]> {
       el.textContent?.trim().slice(0, 80) || el.tagName.toLowerCase()
     ).replace(/\s+/g, ' ').slice(0, 90);
     for (const root of roots) {
-      const unsupported = root.querySelectorAll('select[multiple], input[type="range"], input[type="color"], [role="listbox"][aria-multiselectable="true"], [role="grid"][aria-required="true"], [role="tree"][aria-required="true"], [role="slider"][aria-required="true"], [role="spinbutton"][aria-required="true"]');
+      const unsupported = root.querySelectorAll('input[type="range"], input[type="color"], [role="listbox"][aria-multiselectable="true"], [role="grid"][aria-required="true"], [role="tree"][aria-required="true"], [role="slider"][aria-required="true"], [role="spinbutton"][aria-required="true"]');
       for (const el of unsupported) {
         if (visible(el) && !el.closest('[aria-hidden="true"]')) issues.push('Specialized selection control needs review: ' + describe(el));
       }
       const required = root.querySelectorAll('[required], [aria-required="true"]');
       for (const el of required) {
         if (!visible(el) || el.matches('input[type="hidden"], option, [aria-hidden="true"]')) continue;
-        if (el.matches('select[multiple], input[type="range"], input[type="color"], [role="listbox"][aria-multiselectable="true"]')) continue;
+        if (el.matches('input[type="range"], input[type="color"], [role="listbox"][aria-multiselectable="true"]')) continue;
         if (el.matches('fieldset, [role="group"], [role="radiogroup"]')) continue;
         if (el.closest('[data-astra-control]') || el.querySelector('[data-astra-control]')) continue;
         if (el.closest('[aria-hidden="true"]')) continue;
@@ -74,7 +74,7 @@ async function findUnsupported(frame: Frame): Promise<string[]> {
 export async function assessCompatibility(page: Page, fields: AuditedField[], discoveryFailures: string[] = []): Promise<CompatibilityReport> {
   const issues = [...discoveryFailures];
   for (const field of fields) {
-    if (field.kind === 'select-multiple' || field.kind === 'combobox-multiple') {
+    if (field.kind === 'combobox-multiple') {
       issues.push('Multi-select needs human confirmation: ' + field.label);
     }
     if (field.required && !field.label.trim()) issues.push('Required field has no accessible label.');
