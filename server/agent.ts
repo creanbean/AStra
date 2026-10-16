@@ -118,7 +118,7 @@ async function visibleDropdownChoices(field: Field): Promise<{ label: string; lo
     for (let i = 0, count = Math.min(await options.count(), 120); i < count; i++) {
       const option = options.nth(i);
       if (!await option.isVisible().catch(() => false)) continue;
-      const label = ((await option.getAttribute('aria-label')) || await option.innerText().catch(() => '')).replace(/\\s+/g, ' ').trim();
+      const label = ((await option.getAttribute('aria-label')) || await option.innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
       if (label && !found.some((item) => normalize(item.label) === normalize(label))) found.push({ label, locator: option });
     }
     if (found.length) return found;
