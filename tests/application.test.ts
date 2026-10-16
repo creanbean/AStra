@@ -120,6 +120,52 @@ function fixture(): ExpressApp {
     res.redirect(303, '/complete');
   });
 
+  app.get('/button-dropdown', (_req, res) => res.send(document(`
+    <h1>Apply for Engineer</h1><form method="post" action="/button-dropdown">
+      ${identityFields}
+      <label id="button-authorization-label">Are you legally authorized to work in the United States?</label>
+      <button type="button" id="button-authorization" aria-haspopup="listbox" aria-labelledby="button-authorization-label" aria-controls="button-options" aria-expanded="false" aria-required="true">Choose an answer</button>
+      <div id="button-options" role="listbox" hidden><div role="option">Yes</div><div role="option">No</div></div>
+      <input type="hidden" name="authorized" id="button-value">
+      <button type="submit">Submit application</button>
+    </form><script>
+      const trigger=document.getElementById('button-authorization');
+      const list=document.getElementById('button-options');
+      trigger.addEventListener('click',()=>{list.hidden=!list.hidden;trigger.setAttribute('aria-expanded',String(!list.hidden));});
+      for(const option of list.children)option.addEventListener('click',()=>{
+        document.getElementById('button-value').value=option.textContent.toLowerCase();
+        trigger.textContent=option.textContent;list.hidden=true;trigger.setAttribute('aria-expanded','false');
+      });
+    </script>`)));
+  app.post('/button-dropdown', (req, res) => {
+    record('/button-dropdown', req.body);
+    if (req.body.authorized !== 'yes') return res.status(422).send(document('<p role="alert">Missing work authorization</p>'));
+    res.redirect(303, '/complete');
+  });
+
+  app.get('/searchable-dropdown', (_req, res) => res.send(document(`
+    <h1>Apply for Engineer</h1><form method="post" action="/searchable-dropdown">
+      ${identityFields}
+      <label id="search-label">Are you legally authorized to work in the United States?</label>
+      <div data-field><input role="combobox" id="search-trigger" aria-labelledby="search-label" aria-controls="search-options" aria-required="true" aria-expanded="false" autocomplete="off">
+        <input type="hidden" name="authorized" id="search-value">
+        <div id="search-options" role="listbox" hidden><div role="option" aria-selected="false">Yes</div><div role="option" aria-selected="false">No</div></div>
+      </div><button type="submit">Submit application</button>
+    </form><script>
+      const search=document.getElementById('search-trigger');
+      const choices=document.getElementById('search-options');
+      search.addEventListener('input',()=>{choices.hidden=!search.value;search.setAttribute('aria-expanded',String(!choices.hidden));});
+      for (const option of choices.children) option.addEventListener('click',()=>{
+        document.getElementById('search-value').value=option.textContent.toLowerCase();
+        for(const item of choices.children)item.setAttribute('aria-selected',String(item===option));
+        search.value='';choices.hidden=true;search.setAttribute('aria-expanded','false');
+      });
+    </script>`)));
+  app.post('/searchable-dropdown', (req, res) => {
+    record('/searchable-dropdown', req.body);
+    if (req.body.authorized !== 'yes') return res.status(422).send(document('<p role="alert">Missing work authorization</p>'));
+    res.redirect(303, '/complete');
+  });
   app.get('/review', (_req, res) => res.send(document(`
     <h1>Apply for Engineer</h1><form method="post" action="/review">${identityFields}<button type="submit">Submit application</button></form>`)));
   app.post('/review', (req, res) => { record('/review', req.body); res.redirect(303, '/complete'); });
@@ -333,6 +379,19 @@ describe('browser application agent against a real local application server', ()
     expect(submissions[0].fields).toMatchObject({ firstName: 'Alex', lastName: 'Rivera', email: 'alex.rivera@example.com', authorized: 'yes' });
   });
 
+  it('handles a required button dropdown with aria-haspopup but no combobox role', async () => {
+    const { run } = await application('/button-dropdown');
+    expect(run.status, JSON.stringify(run.events)).toBe('submitted');
+    expect(submissions).toHaveLength(1);
+    expect(submissions[0].fields.authorized).toBe('yes');
+  });
+
+  it('fills searchable options and verifies a choice even when the search input clears', async () => {
+    const { run } = await application('/searchable-dropdown');
+    expect(run.status, JSON.stringify(run.events)).toBe('submitted');
+    expect(submissions).toHaveLength(1);
+    expect(submissions[0].fields.authorized).toBe('yes');
+  });
   it('waits for approval in review mode before posting the final application', async () => {
     const run: ApplicationRun = {
       id: crypto.randomUUID(), url: `${origin}/review`, autoSubmit: false, status: 'queued',
