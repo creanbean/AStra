@@ -37,12 +37,41 @@ function fixture(): ExpressApp {
 
   let humanSolved = false;
   app.get('/human-check', (_req, res) => { humanSolved = false; res.send(document(`
-    <div id="gate" data-sitekey="fixture">Human verification widget</div>
+    <div id="gate" data-sitekey="fixture" role="dialog" aria-label="Complete the CAPTCHA">Complete the CAPTCHA</div>
     <textarea name="g-recaptcha-response" hidden></textarea>
     <form method="post" action="/human-submit">${identityFields}<button>Submit application</button></form>
     <script>const poll=setInterval(async()=>{if((await (await fetch('/human-status')).json()).solved){
       document.querySelector('[name="g-recaptcha-response"]').value='user-completed-fixture';
       document.querySelector('#gate').remove();clearInterval(poll);}},50);</script>`)); });
+  app.get('/recaptcha/api2/anchor', (_req, res) => res.send(document('<p>reCAPTCHA widget background frame</p>')));
+  app.get('/passive-recaptcha', (_req, res) => res.send(document(`
+    <h1>Apply for Electrical Engineer</h1>
+    <p>This site is protected by reCAPTCHA. You may need to verify your email after applying.</p>
+    <form method="post" action="/passive-recaptcha">
+      ${identityFields}
+      <label>Phone number <input name="phone" type="tel" required></label>
+      <textarea name="g-recaptcha-response" hidden></textarea>
+      <button type="submit" class="g-recaptcha" data-sitekey="example-site-key">Submit application</button>
+    </form>
+    <div class="grecaptcha-badge" data-sitekey="example-site-key" style="position:fixed;right:0;bottom:0;width:256px;height:60px">
+      <iframe src="/recaptcha/api2/anchor?size=invisible" title="reCAPTCHA" style="width:256px;height:60px"></iframe>
+      <span>Protected by reCAPTCHA</span>
+    </div>`)));
+  app.post('/passive-recaptcha', (req, res) => {
+    record('/passive-recaptcha', req.body);
+    if (!req.body.firstName || !req.body.email || !req.body.phone) return res.status(422).send(document('<p role="alert">Incomplete</p>'));
+    res.redirect(303, '/complete');
+  });
+  app.get('/interactive-recaptcha', (_req, res) => { humanSolved = false; res.send(document(`
+    <h1>Apply for Electrical Engineer</h1>
+    <form method="post" action="/interactive-recaptcha">${identityFields}<button type="submit">Submit application</button></form>
+    <div id="captcha-panel"><iframe title="reCAPTCHA checkbox" src="/recaptcha/api2/anchor?size=normal" style="width:304px;height:78px;border:0"></iframe></div>
+    <script>const poll=setInterval(async()=>{
+      const solved=(await (await fetch('/human-status')).json()).solved;
+      if(solved){document.getElementById('captcha-panel')?.remove();clearInterval(poll);}
+    },50);</script>`));
+  });
+  app.post('/interactive-recaptcha', (req, res) => { record('/interactive-recaptcha', req.body); res.redirect(303, '/complete'); });
   app.get('/human-status', (_req, res) => res.json({ solved: humanSolved }));
   app.post('/human-solve', (_req, res) => { humanSolved = true; res.json({ ok: true }); });
   app.post('/human-submit', (req, res) => { record('/human-submit', req.body); res.redirect(303, '/complete'); });
@@ -444,6 +473,33 @@ describe('browser application agent against a real local application server', ()
     } finally { fetchSpy.mockRestore(); vi.stubEnv('AI_API_KEY', ''); }
   });
 
+  it('fills and submits a reCAPTCHA v3/invisible badge form without pausing for its empty token', async () => {
+    const waitForInput = vi.fn(async () => { throw new Error('A passive reCAPTCHA badge is not a human challenge'); });
+    const { run } = await application('/passive-recaptcha', { waitForInput });
+    expect(run.status, JSON.stringify(run.events)).toBe('submitted');
+    expect(waitForInput).not.toHaveBeenCalled();
+    expect(submissions).toHaveLength(1);
+    expect(submissions[0].fields.phone).toBe(profile.phone);
+    expect(submissions[0].fields.email).toBe(profile.email);
+  });
+
+  it('fills the form before asking to solve a real visible reCAPTCHA checkbox', async () => {
+    const waitForInput = vi.fn(async () => {
+      expect(submissions).toHaveLength(0);
+      expect(runRef?.events.some(event => event.message.includes('Answered a'))).toBe(true);
+      await fetch(origin + '/human-solve', { method: 'POST' });
+      await new Promise(resolve => setTimeout(resolve, 250));
+      return { __challenge: 'Continue' };
+    });
+    let runRef: ApplicationRun | undefined;
+    const run: ApplicationRun = { id: crypto.randomUUID(), url: origin + '/interactive-recaptcha', autoSubmit: true, status: 'queued', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), events: [], questions: [] };
+    runRef = run;
+    const result = await application('/interactive-recaptcha', { run, waitForInput });
+    expect(result.run.status, JSON.stringify(run.events)).toBe('submitted');
+    expect(waitForInput).toHaveBeenCalledTimes(1);
+    expect(submissions).toHaveLength(1);
+    expect(submissions[0].fields.email).toBe(profile.email);
+  });
   it('pauses for a human challenge and resumes the same browser session to submission', async () => {
     const waitForInput = vi.fn(async () => {
       expect(submissions).toHaveLength(0);
