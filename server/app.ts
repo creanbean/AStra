@@ -182,7 +182,10 @@ export async function createApp(dataDir = process.env.ASTRA_DATA_DIR || '.astra'
     for (const question of run.questions) {
       const value = answers[question.key];
       if (question.required && !value?.trim()) return res.status(400).json({ error: `Answer the required question: ${question.label}` });
-      if (question.options.length && value && !question.options.includes(value)) return res.status(400).json({ error: `Choose an available option for: ${question.label}` });
+      if (question.options.length && value) {
+        const selected = question.type === 'select-multiple' ? value.split(';').map(option => option.trim()).filter(Boolean) : [value];
+        if (!selected.length || selected.some(option => !question.options.includes(option))) return res.status(400).json({ error: `Choose only available options for: ${question.label}` });
+      }
     }
     const waiter = active.answers;
     active.answers = undefined;
