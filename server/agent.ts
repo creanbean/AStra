@@ -452,8 +452,8 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
       }
       // Job detail pages often contain navigation/filter inputs but no application.
       // Open the actual application before auditing or answering incidental fields.
-      const hasApplicationIdentity = fields.some((field) => /\\b(first|given|last|family|full)\\s+name\\b|\\bresume\\b|r[eé]sum[eé]|\\bcover letter\\b/i.test(field.label))
-        || fields.length >= 3 && fields.some((field) => /\\b(email|phone)\\b/i.test(field.label));
+      const hasApplicationIdentity = fields.some((field) => /\b(first|given|last|family|full)\s+name\b|\bresume\b|r[eé]sum[eé]|\bcover letter\b/i.test(field.label))
+        || fields.length >= 3 && fields.some((field) => /\b(email|phone)\b/i.test(field.label));
       if (!hasApplicationIdentity) {
         const entry = await findAction(page, true);
         if (entry?.kind === 'apply') {
@@ -561,7 +561,7 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
         // A genuinely unsupported widget is still not safe to auto-submit.
         await screenshot();
         await log(`Automated fill attempted; unsupported widgets need review: ${report.issues.join('; ')}`, 'warning');
-        if (run.campaignId) throw new Error(`This application needs review after filling recognized fields: ${report.issues.join('; ')}`);
+        // Keep unattended campaigns waiting for a human instead of skipping whole batches.
         const fingerprint = page.url() + JSON.stringify(report.issues);
         if (manualCompatibilityAcknowledged !== fingerprint) {
           await page.bringToFront();
