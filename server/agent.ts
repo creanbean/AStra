@@ -152,6 +152,33 @@ async function fillField(field: Field, answer: string): Promise<void> {
   }
 }
 
+/** Verify the rendered control, not just whether a fill action returned without error. */
+async function hasRenderedAnswer(field: Field, answer: string): Promise<boolean> {
+  try {
+    const locator = field.frame.locator(field.selector);
+    if (field.kind === 'file') return locator.evaluate(el => !!(el as HTMLInputElement).files?.length);
+    if (field.kind === 'select') {
+      const choice = field.choices?.find(c => c.label === answer);
+      return !!choice && await locator.inputValue() === choice.value;
+    }
+    if (field.kind === 'radio') {
+      const choice = field.choices?.find(c => c.label === answer);
+      if (!choice) return false;
+      const option = field.frame.locator(choice.selector);
+      return await option.getAttribute('role') === 'radio' ? await option.getAttribute('aria-checked') === 'true' : option.isChecked();
+    }
+    if (field.kind === 'checkbox') {
+      const expected = /^(yes|true|1)$/i.test(answer.trim());
+      const actual = await locator.getAttribute('role') === 'checkbox'
+        ? await locator.getAttribute('aria-checked') === 'true' : locator.isChecked();
+      return actual === expected;
+    }
+    const actual = await locator.evaluate(el => el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+      ? el.value : el.getAttribute('aria-valuetext') || el.textContent || '');
+    return normalize(actual) === normalize(answer);
+  } catch { return false; }
+}
+
 async function clearOptionalDefault(field: Field): Promise<void> {
   if (field.kind === 'select') {
     await field.frame.locator(field.selector).evaluate((element) => {
@@ -335,13 +362,19 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
         throwIfCancelled(signal);
         if (ignored.has(field.key) && !field.required) continue;
         if (field.required) ignored.delete(field.key);
-        if (completed.get(field.selector) === field.value && field.kind !== 'file') continue;
-        if (completed.has(field.selector) && ['checkbox', 'radio', 'select', 'combobox', 'file'].includes(field.kind)) continue;
+        const previous = completed.get(field.selector);
+        if (previous !== undefined) {
+          // React/ATS forms can reset or replace a control after an async update.
+          // Re-check the DOM so we never treat a lost dropdown selection as filled.
+          if (await hasRenderedAnswer(field, previous)) continue;
+          completed.delete(field.selector);
+        }
         if (field.kind === 'file') {
           if (completed.has(field.selector)) continue;
           const resumeField = /resume|résumé|\bcv\b/i.test(field.label) || fields.filter((f) => f.kind === 'file').length === 1 && !/cover|letter|transcript|certificate|photo|portfolio/i.test(field.label);
           if (resumeField && profile.resume && existsSync(profile.resume.path)) {
             await field.frame.locator(field.selector).setInputFiles({ name: profile.resume.name, mimeType: mimeType(profile.resume.name), buffer: await import('node:fs/promises').then((fs) => fs.readFile(profile.resume!.path)) });
+            if (!await hasRenderedAnswer(field, 'uploaded')) throw new Error('The resume upload did not remain attached.');
             completed.set(field.selector, 'uploaded');
             filled++;
             await log('Attached the uploaded resume.', 'action');
@@ -355,6 +388,7 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
         if (answer.value !== undefined) {
           try {
             await fillField(field, answer.value);
+            if (!await hasRenderedAnswer(field, answer.value)) throw new Error('The form did not retain the selected answer.');
             completed.set(field.selector, answer.value);
             filled++;
             await log(`Answered a ${field.kind} field from ${answer.source === 'ai' ? 'resume-grounded AI reasoning' : answer.source === 'saved' ? 'your saved answer' : 'your profile'}.`, 'action');
