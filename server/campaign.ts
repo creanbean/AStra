@@ -60,16 +60,22 @@ export class CampaignRunner {
         continue;
       }
       // Also deduplicate jobs added manually after discovery.
-      if (this.store.runs.some(r => canonicalUrl(r.url) === job!.url)) { job.state = 'skipped'; await this.store.save(); continue; }
+      if (this.store.runs.some(r => canonicalUrl(r.url) === job!.url)) {
+        job.state = 'skipped';
+        job.outcome = 'Previously attempted; AStra will not automatically repeat a possibly submitted application. Check the prior run history.';
+        await this.store.save(); continue;
+      }
       job.state = 'running';
       c.message = `Applying: ${job.title} at ${job.company}`;
       await this.store.save();
       try {
         const run = await this.deps.apply(job, c, signal);
         job.runId = run.id;
-        job.state = run.status === 'submitted' ? 'submitted' : run.compatibility?.status === 'needs_review' ? 'skipped' : 'failed';
+        job.state = run.status === 'submitted' ? 'submitted' : run.status === 'failed' && run.compatibility?.status === 'needs_review' ? 'skipped' : 'failed';
+        job.outcome = run.result || run.events.filter(event => event.kind === 'warning' || event.kind === 'error').at(-1)?.message || (run.status === 'submitted' ? 'Submission confirmed by the employer.' : 'Application stopped; inspect the run details.');
       } catch (error) {
         job.state = 'failed';
+        job.outcome = error instanceof Error ? error.message : 'The attempt stopped before the browser could open.';
         if (signal.aborted) throw error;
         // Setup failures stop the campaign instead of consuming the queue silently.
         throw error;
@@ -78,6 +84,6 @@ export class CampaignRunner {
     }
     signal.throwIfAborted();
     c.status = 'completed';
-    c.message = `Finished: ${c.jobs.filter(j => j.state === 'submitted').length} confirmed submissions, ${attempted()} attempts. ${attempted() >= c.preferences.maxApplications ? 'Application limit reached.' : 'Search budget reached or no new matching jobs found.'}`;
+    c.message = `Finished: ${c.jobs.filter(j => j.state === 'submitted').length} confirmed submissions, ${c.jobs.filter(j => j.state === 'skipped').length} skipped (see each job's reason), ${c.jobs.filter(j => j.state === 'failed').length} failed, ${attempted()} attempts. ${attempted() >= c.preferences.maxApplications ? 'Application limit reached.' : 'Search budget reached or no new matching jobs found.'}`;
   }
 }
