@@ -508,7 +508,7 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
             filled++;
             await log('Selected multiple choices grounded in your saved profile.', 'action');
           } else if (field.required) {
-            if (run.campaignId) throw new Error('A required multi-select needs a saved, factual answer. No application was submitted.');
+            // Missing multi-choice facts require input, not a discarded campaign.
             unresolved.push({ key: field.key, label: `${field.label} — enter one or more offered choices separated by semicolons.`, type: 'select-multiple', options: field.options, required: true });
           } else ignored.add(field.key);
           continue;
