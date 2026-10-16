@@ -236,6 +236,33 @@ function fixture(): ExpressApp {
     res.redirect(303, '/complete');
   });
 
+
+  app.get('/select2-style', (_req, res) => res.send(document(`
+    <h1>Engineer application</h1><form method="post" action="/select2-style">${identityFields}
+      <label id="style-label">Are you legally authorized to work in the United States?</label>
+      <button id="style-trigger" type="button" role="combobox" aria-labelledby="style-label" aria-controls="style-options" aria-required="true" aria-expanded="false">Choose an answer</button>
+      <div id="style-options" class="select2-results" hidden>
+        <ul><li class="select2-results__option">Yes</li><li class="select2-results__option">No</li></ul>
+      </div>
+      <input type="hidden" name="authorized" id="style-value">
+      <button type="submit">Submit application</button></form>
+      <script>
+        const trigger=document.getElementById('style-trigger');
+        const options=document.getElementById('style-options');
+        trigger.addEventListener('click',()=>{options.hidden=false;trigger.setAttribute('aria-expanded','true');});
+        for(const choice of options.querySelectorAll('li')) choice.addEventListener('click',()=>{
+          document.getElementById('style-value').value=choice.textContent.toLowerCase();
+          trigger.textContent=choice.textContent;
+          trigger.setAttribute('aria-expanded','false');
+          options.hidden=true;
+        });
+      </script>`)));
+  app.post('/select2-style', (req, res) => {
+    record('/select2-style', req.body);
+    if (req.body.authorized !== 'yes') return res.status(422).send(document('<p role="alert">Missing selection</p>'));
+    res.redirect(303, '/complete');
+  });
+
   app.get('/review', (_req, res) => res.send(document(`
     <h1>Apply for Engineer</h1><form method="post" action="/review">${identityFields}<button type="submit">Submit application</button></form>`)));
   app.post('/review', (req, res) => { record('/review', req.body); res.redirect(303, '/complete'); });
@@ -495,6 +522,14 @@ describe('browser application agent against a real local application server', ()
 
   it('opens portal-rendered dropdowns through a sibling React-style toggle', async () => {
     const { run } = await application('/react-toggle');
+    expect(run.status, JSON.stringify(run.events)).toBe('submitted');
+    expect(submissions).toHaveLength(1);
+    expect(submissions[0].fields.authorized).toBe('yes');
+  });
+
+
+  it('selects options in legacy Select2-style custom menus', async () => {
+    const { run } = await application('/select2-style');
     expect(run.status, JSON.stringify(run.events)).toBe('submitted');
     expect(submissions).toHaveLength(1);
     expect(submissions[0].fields.authorized).toBe('yes');
