@@ -1,4 +1,6 @@
 /** Shared bounded API client. Credentials never reach employer pages. */
+export const DEFAULT_AI_MODEL = 'gpt-6.1-sol';
+export const selectedAIModel = () => process.env.AI_MODEL || DEFAULT_AI_MODEL;
 export async function responses(instructions: string, input: unknown, signal: AbortSignal, search = false) {
   if (!process.env.AI_API_KEY) throw new Error('AI_API_KEY is required for automatic discovery and navigation.');
   const base = (process.env.AI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
@@ -10,12 +12,14 @@ export async function responses(instructions: string, input: unknown, signal: Ab
     ...(input !== null && typeof input === 'object' && !Array.isArray(input) ? input : { value: input }),
     _astra_output_format: 'json',
   };
+  const model = selectedAIModel();
   const response = await fetch(url, {
     method: 'POST', redirect: 'error', signal: AbortSignal.any([signal, AbortSignal.timeout(120_000)]),
     headers: { Authorization: `Bearer ${process.env.AI_API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: process.env.AI_MODEL || 'gpt-4.1-mini', store: false,
+    body: JSON.stringify({ model, store: false,
+      ...(model === 'gpt-6.1-sol' ? { reasoning: { effort: 'medium' } } : {}),
       instructions: search ? instructions : `${instructions} Return a valid JSON object.`,
-      input: JSON.stringify(inputDocument), max_output_tokens: 5000,
+      input: JSON.stringify(inputDocument), max_output_tokens: 7000,
       ...(search ? { tools: [{ type: 'web_search' }], tool_choice: 'required', include: ['web_search_call.action.sources'] } : { text: { format: { type: 'json_object' } } }),
     }),
   });
