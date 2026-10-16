@@ -165,12 +165,12 @@ async function hasRenderedAnswer(field: Field, answer: string): Promise<boolean>
       const choice = field.choices?.find(c => c.label === answer);
       if (!choice) return false;
       const option = field.frame.locator(choice.selector);
-      return await option.getAttribute('role') === 'radio' ? await option.getAttribute('aria-checked') === 'true' : option.isChecked();
+      return await option.getAttribute('role') === 'radio' ? await option.getAttribute('aria-checked') === 'true' : await option.isChecked();
     }
     if (field.kind === 'checkbox') {
       const expected = /^(yes|true|1)$/i.test(answer.trim());
       const actual = await locator.getAttribute('role') === 'checkbox'
-        ? await locator.getAttribute('aria-checked') === 'true' : locator.isChecked();
+        ? await locator.getAttribute('aria-checked') === 'true' : await locator.isChecked();
       return actual === expected;
     }
     const actual = await locator.evaluate(el => el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
