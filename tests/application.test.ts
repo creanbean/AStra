@@ -1,5 +1,5 @@
 import { createServer, type Server } from 'node:http';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import express, { type Express as ExpressApp } from 'express';
@@ -252,7 +252,8 @@ async function application(path: string, overrides: Partial<BrowserAgentOptions>
 
 beforeAll(async () => {
   vi.stubEnv('AI_API_KEY', '');
-  if (await readFile('/usr/bin/chromium').then(() => true, () => false)) vi.stubEnv('BROWSER_EXECUTABLE_PATH', '/usr/bin/chromium');
+  // Check the executable without reading the potentially large Chromium binary.
+  if (await access('/usr/bin/chromium').then(() => true, () => false)) vi.stubEnv('BROWSER_EXECUTABLE_PATH', '/usr/bin/chromium');
   temporaryDirectory = await mkdtemp(join(tmpdir(), 'astra-browser-test-'));
   const resumePath = join(temporaryDirectory, 'Alex-Rivera-Resume.pdf');
   await writeFile(resumePath, '%PDF-1.4\n% Local upload fixture\nAlex Rivera\nSoftware Engineer\n%%EOF\n');
