@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { ApplicationRun, Campaign, JobCandidate, SearchPreferences } from '../shared/types.js';
+import { safeToRetry, type ApplicationRun, type Campaign, type JobCandidate, type SearchPreferences } from '../shared/types.js';
 import type { Store } from './store.js';
 import { canonicalUrl, discoverJobs } from './discovery.js';
 
@@ -47,7 +47,10 @@ export class CampaignRunner {
         if (c.rounds >= c.preferences.maxSearchRounds || emptyRounds >= 3) break;
         c.message = `Searching batch ${c.rounds + 1}; ${attempted()} applications attempted.`;
         await this.store.save();
-        const excluded = [...new Set([...this.store.runs.map(r => canonicalUrl(r.url)), ...this.store.campaigns.flatMap(x => x.jobs.map(j => canonicalUrl(j.url)))])];
+        const excluded = [...new Set([
+          ...this.store.runs.filter(run => !safeToRetry(run)).map(run => canonicalUrl(run.url)),
+          ...this.store.campaigns.flatMap(batch => batch.jobs.filter(candidate => batch.id === c.id || !['failed', 'skipped'].includes(candidate.state)).map(candidate => canonicalUrl(candidate.url))),
+        ])];
         const found = await (this.deps.discover || discoverJobs)(c.preferences, excluded, ++c.rounds, signal);
         signal.throwIfAborted();
         const seen = new Set(excluded);
@@ -60,9 +63,9 @@ export class CampaignRunner {
         continue;
       }
       // Also deduplicate jobs added manually after discovery.
-      if (this.store.runs.some(r => canonicalUrl(r.url) === job!.url)) {
+      if (this.store.runs.some(r => canonicalUrl(r.url) === job!.url && !safeToRetry(r))) {
         job.state = 'skipped';
-        job.outcome = 'Previously attempted; AStra will not automatically repeat a possibly submitted application. Check the prior run history.';
+        job.outcome = 'A previous application was submitted, is still active, or has an uncertain outcome. Automatic retry is blocked.';
         await this.store.save(); continue;
       }
       job.state = 'running';
