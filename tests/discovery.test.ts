@@ -21,6 +21,17 @@ it('queues only source-backed individual jobs and rejects fabricated, senior and
   expect(request.tool_choice).toBe('required');
   expect(JSON.parse(request.input)).toEqual({ preferences: prefs, round: 1, excludedUrls: [urls[2]] });
 });
+it('puts the JSON keyword in Responses input while preserving application fields', async () => {
+  vi.stubEnv('AI_API_KEY', 'fixture-key');
+  const mocked = vi.fn().mockResolvedValue(output('{"ok":true}'));
+  vi.stubGlobal('fetch', mocked);
+  const details = { url: 'https://example.com/job/1', controls: [{ label: 'Send my candidacy' }] };
+  await responses('Choose a navigation action.', details, new AbortController().signal);
+  const request = JSON.parse(mocked.mock.calls[0][1].body);
+  expect(request.text).toEqual({ format: { type: 'json_object' } });
+  expect(request.input).toMatch(/json/i);
+  expect(JSON.parse(request.input)).toMatchObject(details);
+});
 it('reports API failures and incomplete output instead of silently fabricating a job queue', async () => {
   vi.stubEnv('AI_API_KEY', 'fixture-key');
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 401 })));
