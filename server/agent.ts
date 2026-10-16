@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { BrowserAgentOptions, Question } from '../shared/types';
 import { challengePresent, checkJobFit, planNavigation } from './navigation.js';
 import { answerQuestion, needsExplicitAnswer, normalize } from './answering';
+import { assessCompatibility } from './compatibility.js';
 
 type Field = Question & {
   selector: string;
@@ -43,7 +44,10 @@ async function discover(frame: Frame, prefix: string): Promise<Field[]> {
       const ids = el.getAttribute('aria-labelledby')?.split(/\s+/).map((id) => idText(id, root)).filter(Boolean).join(' ');
       const labels = 'labels' in el ? [...((el as HTMLInputElement).labels ?? [])].map(labelText).join(' ') : '';
       const associated = el.id ? [...root.querySelectorAll('label')].find((label) => label.htmlFor === el.id) : undefined;
-      return (el.getAttribute('aria-label') || ids || labels || labelText(associated) || labelText(el.closest('label')) || el.getAttribute('placeholder') || el.getAttribute('name') || el.id || '').replace(/\s*\*\s*$/, '').trim();
+      const wrapper = el.closest('[data-field], [data-slot="form-item"], .application-question, .form-group, .field, .question');
+      const nearby = wrapper?.querySelector('label, [data-slot="form-label"], .field-label, .question-label');
+      const sibling = el.previousElementSibling?.matches('label, span') ? el.previousElementSibling : null;
+      return (el.getAttribute('aria-label') || ids || labels || labelText(associated) || labelText(el.closest('label')) || labelText(nearby) || labelText(sibling) || el.getAttribute('placeholder') || el.getAttribute('name') || el.id || '').replace(/\s*\*\s*$/, '').trim().slice(0, 300);
     };
     let counter = 0;
     const tag = (el: HTMLElement) => {
@@ -57,10 +61,10 @@ async function discover(frame: Frame, prefix: string): Promise<Field[]> {
       if (el instanceof HTMLInputElement && ['hidden', 'submit', 'button', 'reset', 'image'].includes(el.type)) continue;
       if (el.closest('[role="combobox"]') && el.getAttribute('role') !== 'combobox') continue;
       const role = el.getAttribute('role');
-      const kind = el instanceof HTMLSelectElement ? 'select' : (role === 'combobox' || el.getAttribute('aria-haspopup') === 'listbox') ? 'combobox' : el instanceof HTMLInputElement ? el.type : role || (el.isContentEditable ? 'contenteditable' : 'textarea');
+      const kind = el instanceof HTMLSelectElement ? (el.multiple ? 'select-multiple' : 'select') : (role === 'combobox' || el.getAttribute('aria-haspopup') === 'listbox') ? 'combobox' : el instanceof HTMLInputElement ? el.type : role || (el.isContentEditable ? 'contenteditable' : 'textarea');
       let label = labelOf(el);
       const container = el.closest('fieldset, [role="radiogroup"], [role="group"]');
-      const required = el.hasAttribute('required') || el.getAttribute('aria-required') === 'true' || !!container?.querySelector('[required], [aria-required="true"]');
+      const required = el.hasAttribute('required') || el.getAttribute('aria-required') === 'true' || (kind === 'radio' && !!container?.querySelector('input[type="radio"][required], [role="radio"][aria-required="true"]')) || (container?.getAttribute('aria-required') === 'true');
       let options: string[] = [];
       let choices: RawField['choices'];
       let value = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement ? el.value : el.getAttribute('aria-valuetext') || el.textContent?.trim() || '';
@@ -368,6 +372,7 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
     let noProgress = 0;
     let previousState = '';
     let activeMs = 0;
+    let manualCompatibilityAcknowledged = '';
     for (let step = 0; step < 80; step++) {
       const started = Date.now();
       throwIfCancelled(signal);
@@ -385,13 +390,32 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
         await log('Verified that the live listing matches your role, level and location.');
       }
       const fields: Field[] = [];
+      const inspectionFailures: string[] = [];
       for (const frame of page.frames()) {
-        const discovered = await discover(frame, marker).catch(() => []);
+        const discovered = await discover(frame, marker).catch(() => {
+          inspectionFailures.push('Could not discover fields in one embedded application frame.');
+          return [] as Field[];
+        });
         // Keys remain stable across navigation but do not collide between frames.
         for (const field of discovered) {
           const duplicate = fields.some((existing) => existing.key === field.key);
           if (duplicate) field.key = `${field.key}:frame-${fields.length}`;
           fields.push(field);
+        }
+      }
+      const report = await assessCompatibility(page, fields, inspectionFailures);
+      if (JSON.stringify(run.compatibility) !== JSON.stringify(report)) {
+        run.compatibility = report;
+        await log(`Form compatibility: ${report.platform}, ${report.status.replace('_', ' ')} (${report.detectedFields} controls detected).${report.issues.length ? ' ' + report.issues.join('; ') : ''}`, report.issues.length ? 'warning' : 'info');
+      }
+      if (report.status === 'needs_review' && report.issues.length) {
+        if (run.campaignId) throw new Error('This form has controls that require manual review. AStra skipped automatic submission. Check compatibility issues in application activity.');
+        const fingerprint = page.url() + JSON.stringify(report.issues);
+        if (manualCompatibilityAcknowledged !== fingerprint) {
+          await page.bringToFront();
+          await pause([{ key: '__compatibility', label: `AStra cannot verify these form widgets: ${report.issues.join('; ')}. Complete them in the open AStra browser without submitting, then continue.`, type: 'manual', options: ['Continue'], required: true }], 'Compatibility check requires a human to complete unsupported form controls. No application has been submitted.');
+          manualCompatibilityAcknowledged = fingerprint;
+          continue;
         }
       }
       let filled = 0;
@@ -420,7 +444,7 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
           else ignored.add(field.key);
           continue;
         }
-        if (field.kind === 'password') continue;
+        if (field.kind === 'password' || field.kind === 'select-multiple') continue;
         if (field.kind === 'combobox' && !field.options.length) await customOptions(field).catch(() => {});
         const answer = await answerQuestion(field, profile, signal);
         // Do not silently skip optional fields when the configured AI provider failed.
@@ -478,6 +502,14 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
       }
       const isFinal = action.kind === 'submit' || action.kind === 'apply' && (fields.length > 0 || submittedAttempt);
       if (isFinal) {
+        // Conditional ATS questions can appear *after* a prior selection. Discover again
+        // immediately before considering submission so we do not miss new required fields.
+        const refreshed: Field[] = [];
+        for (const frame of page.frames()) refreshed.push(...await discover(frame, marker).catch(() => []));
+        if (refreshed.some((field) => field.required && !fields.some((prior) => prior.frame === field.frame && prior.selector === field.selector))) {
+          await log('New required fields appeared after answering. Rechecking the application before submission.', 'info');
+          continue;
+        }
         const errors = await validationErrors(page);
         if (errors.length) {
           // Ask for a corrected answer rather than repeatedly clicking an invalid form.
@@ -488,12 +520,12 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
           continue;
         }
         if (submittedAttempt) throw new Error('The final action was already clicked. Submission is uncertain; check the employer website before retrying.');
-        if (!run.autoSubmit) {
+        if (!run.autoSubmit || run.compatibility?.status === 'needs_review') {
           run.status = 'ready_to_submit';
           const waiting = waitForSubmit();
           void waiting.catch(() => {});
           await screenshot();
-          await log('The application is complete and ready for your submission approval.');
+          await log(run.compatibility?.status === 'needs_review' ? 'Manual compatibility review required before submission. Confirm all unsupported controls in the employer browser.' : 'The application is complete and ready for your submission approval.');
           await waiting;
           throwIfCancelled(signal);
           run.status = 'running';
