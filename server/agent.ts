@@ -385,6 +385,10 @@ export async function runApplication(options: BrowserAgentOptions): Promise<void
         if (field.kind === 'password') continue;
         if (field.kind === 'combobox' && !field.options.length) await customOptions(field).catch(() => {});
         const answer = await answerQuestion(field, profile, signal);
+        // Do not silently skip optional fields when the configured AI provider failed.
+        if (answer.reason && /^(?:AI request failed|AI response was incomplete|AI returned no usable output|AI answering failed)/.test(answer.reason)) {
+          throw new Error(`AI form answering unavailable: ${answer.reason}`);
+        }
         if (answer.value !== undefined) {
           try {
             await fillField(field, answer.value);
