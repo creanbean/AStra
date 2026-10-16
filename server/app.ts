@@ -12,7 +12,7 @@ import { Store } from './store.js';
 import { assertPublicUrl } from './security.js';
 import { runApplication } from './agent.js';
 import { selectedAIModel } from './ai.js';
-import { emptyProfile, type ApplicationRun, type Profile, type Campaign } from '../shared/types.js';
+import { emptyProfile, safeToRetry, type ApplicationRun, type Profile, type Campaign } from '../shared/types.js';
 
 const strings = Object.fromEntries(Object.keys(emptyProfile).filter(key => key !== 'answers').map(key => [key, z.string().max(10000).default('')]));
 const answerSchema = z.record(z.string().min(1).max(1000), z.string().max(10000)).refine(value => Object.keys(value).length <= 200, 'Too many answers.');
@@ -111,7 +111,7 @@ export async function createApp(dataDir = process.env.ASTRA_DATA_DIR || '.astra'
     await assertPublicUrl(url);
     parentSignal?.throwIfAborted();
     if (active) throw new Error('An application is already active.');
-    if (store.runs.some(r => canonicalUrl(r.url) === canonicalUrl(url))) throw new Error('This job already has an application attempt. Check its history before applying again.');
+    if (store.runs.some(r => canonicalUrl(r.url) === canonicalUrl(url) && !safeToRetry(r))) throw new Error('This job is already active, submitted, or has an uncertain final submission. Check its history before trying again.');
     const now = new Date().toISOString();
     const run: ApplicationRun = { id: randomUUID(), url, autoSubmit, campaignId: campaign?.id, searchPreferences: campaign?.preferences, status: 'queued', createdAt: now, updatedAt: now, events: [], questions: [] };
     const profile = structuredClone(store.profile);
