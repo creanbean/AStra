@@ -108,13 +108,16 @@ async function discover(frame: Frame, prefix: string): Promise<Field[]> {
 }
 
 /** Visible options in the open popup. Many ATS menus portal their choices outside the trigger. */
-const dropdownOptionSelector = '[role="option"], [role="menuitemradio"], [role="listbox"] li, [role="listbox"] [data-value], [data-radix-select-viewport] [data-radix-collection-item]';
+const dropdownOptionSelector = '[role="option"], [role="menuitemradio"], .select2-results__option, .choices__item--choice, .ant-select-item-option, [data-automation-id="menuItem"], [role="listbox"] li, [role="listbox"] [data-value], [data-radix-select-viewport] [data-radix-collection-item]';
 
 async function visibleDropdownChoices(field: Field): Promise<{ label: string; locator: Locator }[]> {
   const trigger = field.frame.locator(field.selector);
   const controlled = await trigger.getAttribute('aria-controls') || await trigger.getAttribute('aria-owns');
   const roots: Locator[] = [];
   if (controlled) roots.push(field.frame.locator('[id="' + controlled.replace(/"/g, '\\"') + '"]'));
+  // Read open listbox/menu overlays first, even when framework portals have no
+  // aria-controls relationship. Only fall back to the body when nothing is exposed.
+  roots.push(field.frame.locator('[role="listbox"]:visible, .select2-results:visible, .choices__list--dropdown:visible, .ant-select-dropdown:visible, [data-automation-id="menuContainer"]:visible'));
   roots.push(field.frame.locator('body'));
   for (const root of roots) {
     const options = root.locator(dropdownOptionSelector);
