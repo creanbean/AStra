@@ -11,6 +11,7 @@ import { preferencesSchema, canonicalUrl } from './discovery.js';
 import { Store } from './store.js';
 import { assertPublicUrl } from './security.js';
 import { runApplication } from './agent.js';
+import { selectedAIModel } from './ai.js';
 import { emptyProfile, type ApplicationRun, type Profile, type Campaign } from '../shared/types.js';
 
 const strings = Object.fromEntries(Object.keys(emptyProfile).filter(key => key !== 'answers').map(key => [key, z.string().max(10000).default('')]));
@@ -68,7 +69,7 @@ export async function createApp(dataDir = process.env.ASTRA_DATA_DIR || '.astra'
     catch { const { chromium } = await import('playwright'); try { await access(chromium.executablePath()); } catch { browserAvailable = false; } }
     let baseUrl = 'Invalid AI_BASE_URL';
     try { const url = new URL(process.env.AI_BASE_URL || 'https://api.openai.com/v1'); baseUrl = url.origin + url.pathname; } catch {}
-    res.json({ aiConfigured: Boolean(process.env.AI_API_KEY), model: process.env.AI_MODEL || 'gpt-4.1-mini', baseUrl, browserAvailable, requiresAccessToken: Boolean(accessToken) });
+    res.json({ aiConfigured: Boolean(process.env.AI_API_KEY), model: selectedAIModel(), baseUrl, browserAvailable, requiresAccessToken: Boolean(accessToken) });
   });
   app.get('/api/profile', (_req, res) => res.json(publicProfile()));
   app.put('/api/profile', async (req, res) => {
